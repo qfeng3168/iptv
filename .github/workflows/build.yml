@@ -5,22 +5,19 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-env:
-  SDK_VERSION: v23.05.5
-
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64
-            sdk_image: ghcr.io/openwrt/sdk:x86-64-openwrt-23.05.5
-          - target: aarch64_generic
-            sdk_image: ghcr.io/openwrt/sdk:armsr-armv8-openwrt-23.05.5
-          - target: mipsel_24kc
-            sdk_image: ghcr.io/openwrt/sdk:ramips-mt7621-openwrt-23.05.5
-    name: ${{ matrix.target }}
+          - name: x86_64
+            sdk_image: ghcr.io/openwrt/sdk:x86-64-openwrt-23.05
+          - name: armsr-armv8
+            sdk_image: ghcr.io/openwrt/sdk:armsr-armv8-openwrt-23.05
+          - name: mt7621
+            sdk_image: ghcr.io/openwrt/sdk:ramips-mt7621-openwrt-23.05
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,13 +26,15 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/feed" ${{ matrix.sdk_image }} /bin/bash -exc '
             cd /builder
-            # 拷贝包进 SDK
+            # 喂入依赖源码索引
+            ./scripts/feeds update -a >/dev/null 2>&1 || true
+            ./scripts/feeds install libstdcpp || true
             rm -rf package/iptv-helper
-            cp -r /feed /builder/package/iptv-helper
-            # 先装依赖(离线 feeds)
+            cp -r /feed package/iptv-helper
+            make defconfig
+            echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
             make defconfig
             make package/iptv-helper/compile V=s -j$(nproc)
-            # 汇出 ipk
             mkdir -p /feed/out
             find bin/packages -name "iptv-helper*.ipk" -exec cp {} /feed/out/ \;
           '
@@ -43,7 +42,7 @@ jobs:
       - name: Upload ipk
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-helper-${{ matrix.target }}
+          name: iptv-helper-${{ matrix.name }}
           path: out/*.ipk
 
   release:

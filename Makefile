@@ -14,7 +14,6 @@ define Package/iptv-helper
   CATEGORY:=Network
   TITLE:=IPTV EPG/M3U generator and RTSP replay proxy
   DEPENDS:=+libstdcpp +libc
-  PKGARCH:=all
 endef
 
 define Package/iptv-helper/description
@@ -25,20 +24,21 @@ endef
 
 define Build/Prepare
 	$(INSTALL_DIR) $(PKG_BUILD_DIR)
-	$(CP) ./src/* $(PKG_BUILD_DIR)/
+	$(CP) $(CURDIR)/src/* $(PKG_BUILD_DIR)/
 endef
 
 define Build/Compile
-	$(TARGET_CXX) $(TARGET_CFLAGS) -std=c++17 -O2 -o $(PKG_BUILD_DIR)/iptv-helper $(PKG_BUILD_DIR)/iptv-helper.cpp -pthread
+	$(TARGET_CXX) $(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -std=c++17 -O2 \
+		-o $(PKG_BUILD_DIR)/iptv-helper $(PKG_BUILD_DIR)/iptv-helper.cpp -pthread
 endef
 
 define Package/iptv-helper/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/iptv-helper $(1)/usr/bin/
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) ./files/iptv-helper.config $(1)/etc/config/iptv-helper
+	$(INSTALL_CONF) $(CURDIR)/files/iptv-helper.config $(1)/etc/config/iptv-helper
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/iptv-helper.init $(1)/etc/init.d/iptv-helper
+	$(INSTALL_BIN) $(CURDIR)/files/iptv-helper.init $(1)/etc/init.d/iptv-helper
 	$(INSTALL_DIR) $(1)/www/iptv
 endef
 
