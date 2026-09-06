@@ -1,0 +1,58 @@
+name: build-ipk
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  SDK_VERSION: v23.05.5
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            sdk_image: ghcr.io/openwrt/sdk:x86-64-openwrt-23.05.5
+          - target: aarch64_generic
+            sdk_image: ghcr.io/openwrt/sdk:armsr-armv8-openwrt-23.05.5
+          - target: mipsel_24kc
+            sdk_image: ghcr.io/openwrt/sdk:ramips-mt7621-openwrt-23.05.5
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in OpenWrt SDK
+        run: |
+          docker run --rm -v "$PWD:/feed" ${{ matrix.sdk_image }} /bin/bash -exc '
+            cd /builder
+            # 拷贝包进 SDK
+            rm -rf package/iptv-helper
+            cp -r /feed /builder/package/iptv-helper
+            # 先装依赖(离线 feeds)
+            make defconfig
+            make package/iptv-helper/compile V=s -j$(nproc)
+            # 汇出 ipk
+            mkdir -p /feed/out
+            find bin/packages -name "iptv-helper*.ipk" -exec cp {} /feed/out/ \;
+          '
+
+      - name: Upload ipk
+        uses: actions/upload-artifact@v4
+        with:
+          name: iptv-helper-${{ matrix.target }}
+          path: out/*.ipk
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true, path: out }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.ipk
