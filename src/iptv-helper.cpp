@@ -688,6 +688,8 @@ struct RtspSess {
     std::string cbuf, ubuf;
     std::string client_base, path_query;
     std::string node_url, node_session, our_session;
+    std::string up_host;          // 当前 upfd 连接的目标(连接复用判断)
+    int up_port = 0;
     int udp_rtp = -1, udp_rtcp = -1;
     int rtp_port = 0, rtcp_port = 0;
     uint32_t client_addr4 = 0;
@@ -761,15 +763,19 @@ struct RtspProxy {
     std::string edge_host;
     int edge_port = 554;
 
-    bool upstream_connect(SessPtr &s, int &fd, std::string &ubuf) {
+    // 连接上游;目标(host:port)未变时复用现有连接以保持节点会话。
+    // track_host/track_port 记录 fd 当前连接的目标:主会话 fd 用 session 字段,
+    // resolve() 的临时 fd 传局部变量,避免污染复用判断。
+    bool upstream_connect(SessPtr &s, int &fd, std::string &ubuf, const std::string &target,
+                          std::string *track_host, int *track_port) {
         std::string host; int port;
-        std::string t = s->node_url;
-        if (t.empty()) t = "rtsp://" + edge_host + ":" + std::to_string(edge_port) + s->path_query;
-        if (!host_port_of(t, host, port, 554)) return false;
+        if (!host_port_of(target, host, port, 554)) return false;
+        if (fd >= 0 && host == *track_host && port == *track_port) return true; // 复用
         int nfd = tcp_connect(host.c_str(), port, 15);
         if (nfd < 0) return false;
         if (fd >= 0) CLOSESOCK(fd);
         fd = nfd; ubuf.clear();
+        *track_host = host; *track_port = port;
         log_i("  upstream -> %s:%d", host.c_str(), port);
         return true;
     }
@@ -795,11 +801,12 @@ struct RtspProxy {
     // DESCRIBE 走边缘解析 302(只更新 node_url/缓存),独立 fd
     bool resolve(SessPtr &s) {
         int fd = -1;
-        std::string ubuf;
+        std::string ubuf, rhost;
+        int rport = 0;
         std::string target = "rtsp://" + edge_host + ":" + std::to_string(edge_port) + s->path_query;
         int hops = 0;
         while (hops <= 4) {
-            if (!upstream_connect(s, fd, ubuf)) { if (fd >= 0) CLOSESOCK(fd); return false; }
+            if (!upstream_connect(s, fd, ubuf, target, &rhost, &rport)) { if (fd >= 0) CLOSESOCK(fd); return false; }
             std::string req = "DESCRIBE " + target + " RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n";
             if (!send_all(fd, req)) { CLOSESOCK(fd); return false; }
             std::string resp;
@@ -854,7 +861,8 @@ struct RtspProxy {
                 std::lock_guard<std::mutex> lk(s->up_mtx);
                 std::string ubuf = s->ubuf;
                 int fd = s->upfd;
-                if (!upstream_connect(s, fd, ubuf)) throw std::runtime_error("upstream connect fail");
+                if (!upstream_connect(s, fd, ubuf, target, &s->up_host, &s->up_port))
+                    throw std::runtime_error("upstream connect fail");
                 s->upfd = fd; s->ubuf = ubuf;
                 std::string req = build_req(s, msg, method, target);
                 if (!send_all(s->upfd, req)) throw std::runtime_error("upstream send fail");
@@ -936,8 +944,33 @@ struct RtspProxy {
         while (g_run && fd >= 0) {
             int k = (int)recv(fd, b, sizeof(b), 0);
             if (k <= 0) break;
-            int u = s->upfd;
-            if (u < 0 || !send_all(u, b, (size_t)k)) break;
+            s->cbuf.append(b, (size_t)k);
+            // 拆分:客户端交织帧($)原样转发;RTSP 文本做会话映射后转发并回传响应
+            while (g_run) {
+                if (s->cbuf.empty()) break;
+                if (s->cbuf[0] == '$') {
+                    if (s->cbuf.size() < 4) break;
+                    size_t ln = ((unsigned char)s->cbuf[2] << 8) | (unsigned char)s->cbuf[3];
+                    if (s->cbuf.size() < 4 + ln) break;
+                    std::string frame = s->cbuf.substr(0, 4 + ln);
+                    s->cbuf.erase(0, 4 + ln);
+                    int u = s->upfd;
+                    if (u < 0 || !send_all(u, frame)) return;
+                    continue;
+                }
+                if (s->cbuf.find("\r\n\r\n") == std::string::npos) break;
+                std::string msg;
+                if (!read_rtsp(fd, s->cbuf, msg, 15)) return;
+                sock_set_timeout(fd, 0); // read_rtsp 会改超时,转发期恢复阻塞
+                std::string method = trim(msg.substr(0, msg.find(' ')));
+                if (method.empty()) return;
+                try {
+                    std::string resp = follow(s, msg, method, false);
+                    resp = rewrite_resp(s, resp, method);
+                    if (!send_all(s->client, resp)) return;
+                    if (method == "TEARDOWN") return;
+                } catch (...) { return; }
+            }
         }
         shutdown(s->upfd, SHUT_RDWR);
     }
@@ -962,6 +995,15 @@ struct RtspProxy {
         char b[65536];
         while (g_run && s->udp_rtcp >= 0) {
             int k = (int)recv(s->udp_rtcp, b, sizeof(b), 0);
+            if (k < 0) {
+                // 超时:回到循环检查 g_run;真错误才退出
+#ifdef _WIN32
+                if (WSAGetLastError() == WSAETIMEDOUT) continue;
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+#endif
+                break;
+            }
             if (k <= 0) break;
             std::string frame = "$";
             frame += (char)1;
@@ -985,6 +1027,7 @@ struct RtspProxy {
             if (method.empty()) continue;
             try {
                 std::string resp = follow(s, msg, method, false);
+                sock_set_timeout(s->upfd, 0); // 转发期保持阻塞
                 resp = rewrite_resp(s, resp, method);
                 send_all(s->client, resp);
                 if (method == "TEARDOWN") break;
@@ -1046,6 +1089,7 @@ struct RtspProxy {
                                 a.sin_family = AF_INET;
                                 bind(s->udp_rtp, (struct sockaddr *)&a, sizeof(a));
                                 bind(s->udp_rtcp, (struct sockaddr *)&a, sizeof(a));
+                                sock_set_timeout(s->udp_rtcp, 5); // 周期醒来检查 g_run
                                 s->local_ip = local_ip_of(cfd);
                             }
                         }
@@ -1057,6 +1101,9 @@ struct RtspProxy {
                 int code = code_of(resp);
                 if (method == "PLAY" && code >= 200 && code < 300) {
                     log_i("  relaying (%s)", s->udp ? "udp reframe" : "tcp passthrough");
+                    // 转发阶段取消握手期的短超时,恢复阻塞模式,防止静默期断流
+                    sock_set_timeout(s->upfd, 0);
+                    sock_set_timeout(s->client, 0);
                     if (s->udp) {
                         std::thread t1(&RtspProxy::pump_up_udp, this, s);
                         std::thread t2(&RtspProxy::pump_client_rtcp, this, s);

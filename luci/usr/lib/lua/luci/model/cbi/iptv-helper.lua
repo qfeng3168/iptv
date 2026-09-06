@@ -7,11 +7,11 @@ m = Map("iptv-helper", translate("IPTV Helper"),
 
 s = m:section(NamedSection, "main", "iptv-helper", translate("IPTV Helper"))
 s.addremove = false
-s.tab("svc", translate("服务"))
-s.tab("gen", translate("基本与生成"))
-s.tab("auth", translate("鉴权(抓包填写)"))
-s.tab("net", translate("服务器与发布地址"))
-s.tab("files", translate("输出文件"))
+s:tab("svc", translate("服务"))
+s:tab("gen", translate("基本与生成"))
+s:tab("auth", translate("鉴权(抓包填写)"))
+s:tab("net", translate("服务器与发布地址"))
+s:tab("files", translate("输出文件"))
 
 -- ============ 服务 ============
 local autostart = sys.init.enabled("iptv-helper")
