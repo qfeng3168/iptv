@@ -653,7 +653,8 @@ static bool run_generate(const Config &cfg) {
         : rtsp_self;
 
     write_file(dir + "/" + cfg.get("lanlive_file", "LanLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_lan")));
-    write_file(dir + "/" + cfg.get("lanreplay_file", "LanReplay.m3u"), gen_replay_m3u(cfg, chs, lan_replay, false));
+    // 内网回看同样带 catchup(playseek)时间戳,配合节目单可点播回放
+    write_file(dir + "/" + cfg.get("lanreplay_file", "LanReplay.m3u"), gen_replay_m3u(cfg, chs, lan_replay, cfg.getb("lan_catchup", true)));
     write_file(dir + "/" + cfg.get("netlive_file", "NetLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_pub")));
     write_file(dir + "/" + cfg.get("netreplay_file", "NetReplay.m3u"), gen_replay_m3u(cfg, chs, cfg.get("replay_pub"), true));
     write_file(dir + "/" + cfg.get("txt_file", "channels.txt"), gen_txt(cfg, chs, lan_ip, rtsp_self));

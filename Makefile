@@ -16,6 +16,14 @@ define Package/iptv-helper
   DEPENDS:=+libstdcpp +libc
 endef
 
+define Package/luci-app-iptv-helper
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=LuCI config page for iptv-helper
+  DEPENDS:=+luci-base +iptv-helper
+endef
+
 define Package/iptv-helper/description
   Fetch EPG (auth + channel list + playbill), generate M3U/TXT/EPG files for
   uhttpd download, and provide an RTSP catch-up (playseek) replay proxy.
@@ -42,4 +50,10 @@ define Package/iptv-helper/install
 	$(INSTALL_DIR) $(1)/www/iptv
 endef
 
+define Package/luci-app-iptv-helper/install
+	$(INSTALL_DIR) $(1)/usr/lib/lua/luci
+	$(CP) $(CURDIR)/luci/usr/lib/lua/luci/* $(1)/usr/lib/lua/luci/
+endef
+
 $(eval $(call BuildPackage,iptv-helper))
+$(eval $(call BuildPackage,luci-app-iptv-helper))

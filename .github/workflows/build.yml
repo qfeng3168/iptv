@@ -47,7 +47,7 @@ jobs:
           make defconfig
           make package/iptv-helper/compile V=s -j$(nproc)
           mkdir -p $GITHUB_WORKSPACE/out
-          find bin/packages -name "iptv-helper*.ipk" -exec cp {} $GITHUB_WORKSPACE/out/ \;
+          find bin/packages -name "*iptv-helper*.ipk" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
       - name: Upload ipk
         uses: actions/upload-artifact@v4
