@@ -525,8 +525,18 @@ static std::string gen_replay_m3u(const Config &cfg, const std::vector<Channel> 
     std::string o = "#EXTM3U\n";
     std::string extra;
     if (catchup) {
-        std::string fmt = cfg.get("catchup_fmt", "yyyyMMddHHmmss");
-        extra = " catchup=\"append\" catchup-source=\"?playseek=${(b)" + fmt + "}-${(e)" + fmt + "}\"";
+        // catchup-source 支持多源,播放器按 " or " 顺序尝试:
+        // 默认 playseek + starttime 两种时移参数,模板全部来自配置
+        std::vector<std::string> params = cfg.getlist("catchup_params");
+        if (params.empty()) {
+            std::string fmt = cfg.get("catchup_fmt", "yyyyMMddHHmmss");
+            params.push_back("playseek=${(b)" + fmt + "}-${(e)" + fmt + "}");
+        }
+        std::string src;
+        for (size_t i = 0; i < params.size(); ++i) {
+            src += (i ? " or ?" : "?") + params[i];
+        }
+        extra = " catchup=\"append\" catchup-source=\"" + src + "\"";
     }
     for (auto &ch : chs) {
         std::string sp = smil_path(ch);

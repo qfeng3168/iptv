@@ -136,6 +136,23 @@ o = s:taboption("net", Value, "lan_ip", translate("本机 LAN IP(留空自动探
 o.datatype = "ipaddr"
 
 -- ============ 输出文件 ============
+local http = require "luci.http"
+local out_dir = m.uci:get("iptv-helper", "main", "out_dir") or "/www/iptv"
+-- web 路径 = out_dir 去掉 uhttpd 根(/www)前缀
+local webpath = out_dir:gsub("^/www", "", 1)
+if webpath == "" then webpath = "/" end
+local pub = m.uci:get("iptv-helper", "main", "http_pub_base")
+local base
+if pub and pub ~= "" then
+	base = pub:gsub("/$", "")
+else
+	local host = http.getenv("HTTP_HOST") or (m.uci:get("iptv-helper", "main", "lan_ip") or "")
+	base = "http://" .. host
+end
+local function file_url(name)
+	return base .. webpath .. "/" .. name
+end
+
 local file_keys = {
 	{"lanlive_file", "LanLive 文件名", "LanLive.m3u"},
 	{"lanreplay_file", "LanReplay 文件名", "LanReplay.m3u"},
@@ -147,12 +164,22 @@ local file_keys = {
 for _, kv in ipairs(file_keys) do
 	o = s:taboption("files", Value, kv[1], translate(kv[2]))
 	o.default = kv[3]
+	local dv = s:taboption("files", DummyValue, "_" .. kv[1], translate("下载地址"))
+	dv.cfgvalue = function(self, section)
+		local name = m.uci:get("iptv-helper", section, kv[1]) or kv[3]
+		local url = file_url(name)
+		if kv[1] == "epg_file" then url = url .. ".gz" end
+		return url
+	end
 end
 
 o = s:taboption("files", Value, "epg_name", translate("EPG 名称"))
 o.default = "IPTV EPG"
 
-o = s:taboption("files", Value, "catchup_fmt", translate("catchup 时间格式"))
+o = s:taboption("files", Value, "catchup_fmt", translate("catchup 时间格式(兜底)"))
 o.default = "yyyyMMddHHmmss"
+
+o = s:taboption("gen", DynamicList, "catchup_params", translate("catchup 参数模板"),
+	translate("多值,生成 catchup-source 后按顺序用 \" or \" 连接,播放器逐个尝试。变量: ${(b)yyyyMMddHHmmss} 起始、${(e)yyyyMMddHHmmss} 结束"))
 
 return m
