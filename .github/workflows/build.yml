@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+env:
+  OW_RELEASE: 23.05.5
+
 jobs:
   build:
     strategy:
@@ -12,33 +15,39 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            sdk_image: ghcr.io/openwrt/sdk:x86-64-openwrt-23.05
+            target_path: targets/x86/64
           - name: armsr-armv8
-            sdk_image: ghcr.io/openwrt/sdk:armsr-armv8-openwrt-23.05
+            target_path: targets/armsr/armv8
           - name: mt7621
-            sdk_image: ghcr.io/openwrt/sdk:ramips-mt7621-openwrt-23.05
+            target_path: targets/ramips/mt7621
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build in OpenWrt SDK
+      - name: Download OpenWrt SDK
         run: |
-          docker run --rm -v "$PWD:/feed" ${{ matrix.sdk_image }} /bin/bash -exc '
-            cd /builder
-            # 喂入依赖源码索引
-            ./scripts/feeds update -a
-            ./scripts/feeds install libstdcpp
-            rm -rf package/iptv-helper
-            mkdir -p package
-            cp -r /feed package/iptv-helper
-            make defconfig
-            echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
-            make defconfig
-            make package/iptv-helper/compile V=s -j$(nproc)
-            mkdir -p /feed/out
-            find bin/packages -name "iptv-helper*.ipk" -exec cp {} /feed/out/ \;
-          '
+          BASE="https://downloads.openwrt.org/releases/${{ env.OW_RELEASE }}/${{ matrix.target_path }}"
+          SDK=$(curl -s "$BASE/" | grep -o 'openwrt-sdk-[^"]*Linux-x86_64\.tar\.xz' | head -1)
+          echo "SDK file: $SDK"
+          curl -fsSL "$BASE/$SDK" -o sdk.tar.xz
+          tar -xf sdk.tar.xz
+          mv openwrt-sdk-* sdk
+
+      - name: Build ipk
+        run: |
+          cd sdk
+          ./scripts/feeds update -a
+          ./scripts/feeds install libstdcpp
+          rm -rf package/iptv-helper
+          mkdir -p package/iptv-helper
+          cp -r $GITHUB_WORKSPACE/* package/iptv-helper/
+          make defconfig
+          echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
+          make defconfig
+          make package/iptv-helper/compile V=s -j$(nproc)
+          mkdir -p $GITHUB_WORKSPACE/out
+          find bin/packages -name "iptv-helper*.ipk" -exec cp {} $GITHUB_WORKSPACE/out/ \;
 
       - name: Upload ipk
         uses: actions/upload-artifact@v4
