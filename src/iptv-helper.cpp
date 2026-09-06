@@ -240,7 +240,7 @@ static std::string local_ip_of(int fd) {
     if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0) return "127.0.0.1";
     char buf[64] = {0};
     if (ss.ss_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)&ss)->sin_addr, buf, sizeof(buf));
-    else inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&ss)->sin_addr, buf, sizeof(buf));
+    else inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&ss)->sin6_addr, buf, sizeof(buf));
     return buf;
 }
 // 本机出口 IP(用于生成指向本机代理的 URL)
@@ -424,7 +424,7 @@ static std::string fetch_logo(HttpClient &hc, const Config &cfg, const std::stri
                      "application/x-www-form-urlencoded; charset=UTF-8");
     std::regex re("(http://[^\"^\\s]*\\.(png|jpg|gif))");
     std::smatch m;
-    if (std::regex_search(r.body, m, re)) return m.group(1).str();
+    if (std::regex_search(r.body, m, re)) return m[1].str();
     return "";
 }
 
@@ -898,7 +898,7 @@ struct RtspProxy {
             std::smatch m;
             std::regex sre("Session:\\s*([^;\r\n]+)", std::regex::icase);
             if (std::regex_search(out, m, sre)) {
-                s->node_session = trim(m.group(1).str());
+                s->node_session = trim(m[1].str());
                 s->our_session = "900" + std::to_string(g_sess_counter++);
                 std::regex wre("Session:[^\r\n]*", std::regex::icase);
                 out = std::regex_replace(out, wre, "Session: " + s->our_session);
@@ -1020,7 +1020,7 @@ struct RtspProxy {
                     std::smatch m;
                     std::string cs = "0";
                     std::regex re("CSeq:\\s*(\\d+)", std::regex::icase);
-                    if (std::regex_search(msg, m, re)) cs = m.group(1).str();
+                    if (std::regex_search(msg, m, re)) cs = m[1].str();
                     std::string resp = "RTSP/1.0 200 OK\r\nCSeq: " + cs +
                         "\r\nPublic: OPTIONS, DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE, SET_PARAMETER\r\n\r\n";
                     send_all(cfd, resp);
@@ -1031,15 +1031,15 @@ struct RtspProxy {
                     std::smatch m;
                     std::regex tre("Transport:[^\r\n]*", std::regex::icase);
                     if (std::regex_search(msg, m, tre)) {
-                        std::string trline = m.group(0).str();
+                        std::string trline = m[0].str();
                         std::string trl = lower(trline);
                         if (trl.find("rtp/avp/tcp") == std::string::npos && trl.find("interleaved") == std::string::npos) {
                             std::regex pre("client_port=(\\d+)(?:-(\\d+))?", std::regex::icase);
                             std::smatch pm;
                             if (std::regex_search(trline, pm, pre)) {
                                 s->udp = true;
-                                s->rtp_port = atoi(pm.group(1).str().c_str());
-                                s->rtcp_port = pm.group(2).matched ? atoi(pm.group(2).str().c_str()) : s->rtp_port + 1;
+                                s->rtp_port = atoi(pm[1].str().c_str());
+                                s->rtcp_port = pm[2].matched ? atoi(pm[2].str().c_str()) : s->rtp_port + 1;
                                 s->udp_rtp = socket(AF_INET, SOCK_DGRAM, 0);
                                 s->udp_rtcp = socket(AF_INET, SOCK_DGRAM, 0);
                                 struct sockaddr_in a; memset(&a, 0, sizeof(a));
