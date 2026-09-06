@@ -18,6 +18,8 @@ jobs:
             target_path: targets/x86/64
           - name: armsr-armv8
             target_path: targets/armsr/armv8
+          - name: aarch64_cortex-a53
+            target_path: targets/sunxi/cortexa53
           - name: mt7621
             target_path: targets/ramips/mt7621
     name: ${{ matrix.name }}

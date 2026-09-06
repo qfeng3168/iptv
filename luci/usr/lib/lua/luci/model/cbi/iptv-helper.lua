@@ -5,12 +5,51 @@ local sys = require "luci.sys"
 m = Map("iptv-helper", translate("IPTV Helper"),
 	translate("EPG 抓取生成 M3U/节目单 + RTSP 回看代理。所有参数保存于 /etc/config/iptv-helper。生成物在 /www/iptv,由 uhttpd 提供下载。"))
 
-s = m:section(NamedSection, "main", "iptv-helper", translate("运行与服务"))
+s = m:section(NamedSection, "main", "iptv-helper", translate("IPTV Helper"))
 s.addremove = false
+s.tab("svc", translate("服务"))
 s.tab("gen", translate("基本与生成"))
 s.tab("auth", translate("鉴权(抓包填写)"))
 s.tab("net", translate("服务器与发布地址"))
 s.tab("files", translate("输出文件"))
+
+-- ============ 服务 ============
+local autostart = sys.init.enabled("iptv-helper")
+local running = (sys.exec("pidof iptv-helper 2>/dev/null") ~= "")
+
+o = s:taboption("svc", DummyValue, "_status", translate("当前状态"))
+o.value = running and "● 运行中" or "○ 未运行(开机自启:" .. (autostart and "已开启" or "未开启") .. ")"
+
+o = s:taboption("svc", Flag, "_autostart", translate("开机自启"))
+o.cfgvalue = function(self, section)
+	return autostart and "1" or "0"
+end
+o.write = function(self, section, value)
+	if value == "1" then
+		sys.init.enable("iptv-helper")
+	else
+		sys.init.disable("iptv-helper")
+	end
+end
+o.remove = function(self, section) end
+
+btn = s:taboption("svc", Button, "_start", translate("启动服务"))
+btn.inputtitle = translate("启动")
+btn.write = function(self, section)
+	sys.call("/etc/init.d/iptv-helper start >/dev/null 2>&1")
+end
+
+btn = s:taboption("svc", Button, "_stop", translate("停止服务"))
+btn.inputtitle = translate("停止")
+btn.write = function(self, section)
+	sys.call("/etc/init.d/iptv-helper stop >/dev/null 2>&1")
+end
+
+btn = s:taboption("svc", Button, "_restart", translate("重启服务"))
+btn.inputtitle = translate("重启")
+btn.write = function(self, section)
+	sys.call("/etc/init.d/iptv-helper restart >/dev/null 2>&1")
+end
 
 -- ============ 基本与生成 ============
 o = s:taboption("gen", ListValue, "mode", translate("运行模式(procd 服务)"))
@@ -37,26 +76,14 @@ o.default = "8"
 o = s:taboption("gen", Flag, "lan_catchup", translate("LanReplay 带回看时间戳"))
 o.default = "1"
 
-o = s:taboption("gen", Flag, "replay_via_proxy", translate("内网回看走本机代理"))
--- 与 config 的 replay_via(proxy/direct) 映射
-o.cfgvalue = function(self, section)
-	return (m.uci:get("iptv-helper", section, "replay_via") == "proxy") and "1" or "0"
-end
-o.write = function(self, section, value)
-	m.uci:set("iptv-helper", section, "replay_via", (value == "1") and "proxy" or "direct")
-end
-o.remove = function(self, section) end
+o = s:taboption("gen", ListValue, "replay_via", translate("内网回看地址"))
+o:value("proxy", translate("走本机代理(推荐)"))
+o:value("direct", translate("直连边缘服务器"))
 
 btn = s:taboption("gen", Button, "_run_generate", translate("立即生成"))
 btn.inputtitle = translate("生成(后台执行,需数分钟)")
 btn.write = function(self, section)
 	sys.call("/usr/bin/iptv-helper -c /etc/config/iptv-helper generate >/tmp/iptv-helper-generate.log 2>&1 &")
-end
-
-btn = s:taboption("gen", Button, "_restart_service", translate("重启服务"))
-btn.inputtitle = translate("重启 iptv-helper")
-btn.write = function(self, section)
-	sys.call("/etc/init.d/iptv-helper restart >/dev/null 2>&1")
 end
 
 -- ============ 鉴权 ============

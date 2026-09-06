@@ -50,6 +50,16 @@ define Package/iptv-helper/install
 	$(INSTALL_DIR) $(1)/www/iptv
 endef
 
+# 安装即自启并启动服务
+define Package/iptv-helper/postinst
+#!/bin/sh
+[ -n "$$IPKG_INSTROOT" ] || {
+	/etc/init.d/iptv-helper enable
+	/etc/init.d/iptv-helper start
+}
+exit 0
+endef
+
 define Package/luci-app-iptv-helper/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci
 	$(CP) $(CURDIR)/luci/usr/lib/lua/luci/* $(1)/usr/lib/lua/luci/
