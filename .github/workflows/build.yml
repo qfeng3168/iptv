@@ -8,6 +8,9 @@ on:
 env:
   OW_RELEASE: 23.05.5
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
