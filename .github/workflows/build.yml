@@ -27,9 +27,10 @@ jobs:
           docker run --rm -v "$PWD:/feed" ${{ matrix.sdk_image }} /bin/bash -exc '
             cd /builder
             # 喂入依赖源码索引
-            ./scripts/feeds update -a >/dev/null 2>&1 || true
-            ./scripts/feeds install libstdcpp || true
+            ./scripts/feeds update -a
+            ./scripts/feeds install libstdcpp
             rm -rf package/iptv-helper
+            mkdir -p package
             cp -r /feed package/iptv-helper
             make defconfig
             echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
