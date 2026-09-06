@@ -28,8 +28,6 @@
 #include <algorithm>
 #include <functional>
 
-#include <syslog.h>
-
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -38,12 +36,18 @@
 #  define SOCKOPT const char
 #  define SOCKLEN int
 #  define SHUT_RDWR 2
+// Windows 本地调试垫片:日志只走 stderr(Linux 目标不受影响)
+enum { LOG_INFO = 6, LOG_ERR = 3, LOG_PID = 0x01, LOG_NDELAY = 0x08, LOG_DAEMON = 0x18 };
+static inline void syslog(int, const char *, ...) {}
+static inline void openlog(const char *, int, int) {}
+static inline void closelog() {}
 #else
 #  include <unistd.h>
 #  include <fcntl.h>
 #  include <errno.h>
 #  include <sys/socket.h>
 #  include <sys/time.h>
+#  include <syslog.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <netdb.h>
@@ -186,9 +190,16 @@ static Config g_cfg;
 
 // ---------------------------------------------------------------- socket 小工具
 static void sock_set_timeout(int fd, int seconds) {
+#ifdef _WIN32
+    // Windows: SO_RCVTIMEO/SO_SNDTIMEO 收 DWORD 毫秒;传 timeval 会被错读成毫秒
+    DWORD ms = (DWORD)seconds * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof(ms));
+#else
     struct timeval tv; tv.tv_sec = seconds; tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (SOCKOPT *)&tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (SOCKOPT *)&tv, sizeof(tv));
+#endif
 }
 
 static int tcp_connect(const char *host, int port, int timeout_sec) {
@@ -210,7 +221,7 @@ static int tcp_connect(const char *host, int port, int timeout_sec) {
         struct timeval tv; tv.tv_sec = timeout_sec; tv.tv_usec = 0;
         if (select(fd + 1, nullptr, &w, nullptr, &tv) <= 0) { CLOSESOCK(fd); freeaddrinfo(res); return -1; }
         int err = 0; SOCKLEN elen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, (SOCKOPT *)&err, &elen);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&err, &elen);
         if (err) { CLOSESOCK(fd); freeaddrinfo(res); return -1; }
     }
 #ifdef _WIN32
@@ -706,6 +717,14 @@ struct RtspSess {
     bool udp = false;
     std::string local_ip;
     std::mutex up_mtx; // 上游 fd 读写保护
+
+    // 上游目标:已解析节点 > 全局缓存 > 边缘服务器
+    std::string target_url(const std::string &edge_host, int edge_port) {
+        if (!node_url.empty()) return node_url;
+        std::string c = cache_get(lower(path_query));
+        if (!c.empty()) { node_url = c; return c; }
+        return "rtsp://" + edge_host + ":" + std::to_string(edge_port) + path_query;
+    }
 };
 
 using SessPtr = std::shared_ptr<RtspSess>;
@@ -715,7 +734,14 @@ static bool read_rtsp(int fd, std::string &buf, std::string &msg, int timeout) {
     while (buf.find("\r\n\r\n") == std::string::npos) {
         char tmp[8192];
         int k = (int)recv(fd, tmp, sizeof(tmp), 0);
-        if (k <= 0) return false;
+        if (k <= 0) {
+#ifdef _WIN32
+            log_e("read_rtsp recv fail fd=%d k=%d wsaerr=%d", fd, k, WSAGetLastError());
+#else
+            log_e("read_rtsp recv fail fd=%d k=%d errno=%d", fd, k, errno);
+#endif
+            return false;
+        }
         buf.append(tmp, (size_t)k);
         if (buf.size() > 131072) return false;
     }
@@ -860,11 +886,10 @@ struct RtspProxy {
             resolve(s);
             if (!s->node_url.empty()) log_i("  pre-resolved node: %.90s", s->node_url.c_str());
         }
+        // 目标优先级:已解析节点 > 全局缓存 > 边缘服务器(缓存命中会回填 node_url)
         std::string target = force_edge
             ? "rtsp://" + edge_host + ":" + std::to_string(edge_port) + s->path_query
-            : (s->node_url.empty()
-                ? "rtsp://" + edge_host + ":" + std::to_string(edge_port) + s->path_query
-                : s->node_url);
+            : s->target_url(edge_host, edge_port);
         int hops = 0;
         while (true) {
             {
@@ -1058,7 +1083,10 @@ struct RtspProxy {
                 std::string first = first_line_of(msg);
                 size_t sp1 = first.find(' ');
                 size_t sp2 = first.find(' ', sp1 + 1);
-                if (sp1 == std::string::npos || sp2 == std::string::npos) break;
+                if (sp1 == std::string::npos || sp2 == std::string::npos) {
+                    log_e("unparsable request line (%d bytes): %.80s", (int)msg.size(), msg.c_str());
+                    break;
+                }
                 std::string method = first.substr(0, sp1);
                 std::string url = first.substr(sp1 + 1, sp2 - sp1 - 1);
                 if (url != "*") {
