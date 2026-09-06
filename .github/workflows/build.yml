@@ -41,7 +41,7 @@ jobs:
           ./scripts/feeds install libstdcpp
           rm -rf package/iptv-helper
           mkdir -p package/iptv-helper
-          cp -r $GITHUB_WORKSPACE/* package/iptv-helper/
+          for f in Makefile src files luci; do cp -r "$GITHUB_WORKSPACE/$f" package/iptv-helper/; done
           make defconfig
           echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
           make defconfig
