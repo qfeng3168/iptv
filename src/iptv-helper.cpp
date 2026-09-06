@@ -1075,7 +1075,12 @@ struct RtspProxy {
         SessPtr s = std::make_shared<RtspSess>();
         s->client = cfd;
         s->client_addr4 = caddr;
-        log_i("connect from %u.%u.%u.%u", caddr & 0xFF, (caddr >> 8) & 0xFF, (caddr >> 16) & 0xFF, (caddr >> 24) & 0xFF);
+        {
+            struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_addr.s_addr = caddr;
+            log_i("connect from %s", inet_ntoa(sa.sin_addr));
+        }
         try {
             while (g_run) {
                 std::string msg;
@@ -1193,7 +1198,8 @@ struct RtspProxy {
             SOCKLEN cl = sizeof(ca);
             int cfd = accept(listen_fd, (struct sockaddr *)&ca, &cl);
             if (cfd < 0) continue;
-            uint32_t addr = ntohl(ca.sin_addr.s_addr);
+            // 保持网络字节序,sendto 直接使用
+            uint32_t addr = ca.sin_addr.s_addr;
             std::thread(&RtspProxy::handle, this, cfd, addr).detach();
         }
     }
