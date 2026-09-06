@@ -5,6 +5,18 @@ IPTV 助手:EPG 鉴权抓取 → 生成 M3U/TXT/EPG 节目单 → RTSP 回看(pl
 **cron 或内置调度**;服务由 **procd** 托管;日志进 **syslog**。代码零硬编码,
 全部参数在 `/etc/config/iptv-helper`。
 
+> ✅ **已实测通过:河北电信 IPTV**(华为 HWServer/HMS_V1R2 平台,320 频道,
+> 7 天节目单抓取、直播、RTSP 回看全部验证可用)。
+
+## 参考 / 致谢
+
+- [xinjiawei1/heiptv](https://github.com/xinjiawei1/heiptv) — 电信 IPTV 模拟与 EPJ 抓取原理(鉴权表单、
+  `getchannellistHWCTC.jsp`、`QueryPlaybillList` 等接口用法)参考该项目及其 Python 实现
+- 回看 URL 格式为实测结论:频道 smil 地址 + `?playseek=YYYYMMDDHHMMSS-YYYYMMDDHHMMSS`
+  (路径后缀式 `/起-止` 在华为 HMS 上为 404)
+- 华为边缘服务器 302 跳转媒体节点、仅对 `RTP/AVP/TCP;interleaved` 出流等行为,
+  均为对河北电信现网实测得出
+
 ## 功能
 
 | 模式 | 说明 |
@@ -18,8 +30,9 @@ IPTV 助手:EPG 鉴权抓取 → 生成 M3U/TXT/EPG 节目单 → RTSP 回看(pl
 
 ## 编译(GitHub Actions 自动)
 
-push 后 Actions 会用 OpenWrt SDK(x86_64 / armsr-armv8 / mt7621)交叉编译出 ipk,
-tag(`v*`)推送时自动发 Release。本地 SDK 编译:
+push 后 Actions 会用 OpenWrt 官方 SDK 交叉编译出 ipk( targets:x86_64 /
+armsr-armv8 / aarch64_cortex-a53 / mt7621),tag(`v*`)推送时自动发 Release。
+本地 SDK 编译:
 
 ```sh
 cp -r iptv-helper <sdk>/package/
@@ -29,10 +42,11 @@ cd <sdk> && make defconfig && make package/iptv-helper/compile V=s
 ## 安装与配置
 
 ```sh
-opkg install iptv-helper_*.ipk
-# 编辑 /etc/config/iptv-helper:EPG 地址、鉴权表单(抓包)、边缘服务器、udpxy、定时
-vi /etc/config/iptv-helper
-/etc/init.d/iptv-helper enable && /etc/init.d/iptv-helper start
+opkg install iptv-helper_*.ipk luci-app-iptv-helper_*.ipk
+# 安装即自启。LuCI: 网络 → IPTV Helper
+#   「服务」页: 开机自启开关、启动/停止/重启
+#   其余页: EPG 地址、鉴权表单(抓包)、边缘服务器、udpxy、定时
+#   「基本与生成」页点「立即生成」
 ```
 
 生成物下载地址(uhttpd):
