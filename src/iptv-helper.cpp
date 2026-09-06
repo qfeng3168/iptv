@@ -1125,6 +1125,11 @@ struct RtspProxy {
                                 s->udp_rtcp = socket(AF_INET, SOCK_DGRAM, 0);
                                 struct sockaddr_in a; memset(&a, 0, sizeof(a));
                                 a.sin_family = AF_INET;
+                                // 绑定到客户端连入的本机地址,保证 RTP 源地址与 Transport
+                                // 里宣告的 source 一致(多接口/跨网段时客户端会按源过滤)
+                                a.sin_addr.s_addr = inet_addr(s->local_ip.c_str());
+                                if (a.sin_addr.s_addr == 0xFFFFFFFFu || a.sin_addr.s_addr == 0)
+                                    a.sin_addr.s_addr = 0; // 解析失败退回 0.0.0.0
                                 bind(s->udp_rtp, (struct sockaddr *)&a, sizeof(a));
                                 bind(s->udp_rtcp, (struct sockaddr *)&a, sizeof(a));
                                 sock_set_timeout(s->udp_rtcp, 5); // 周期醒来检查 g_run
