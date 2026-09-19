@@ -71,9 +71,11 @@ m3u 里的 `tvg-logo` 指向本地缓存地址(基址 = `http_pub_base`,留空�
 
 模板的两种写法(可混用):
 
-- **完整属性片段**(含 `="`):原样写入 `#EXTINF`,每项自成一组。要「回看 + 时移并列」就用这种写法
-- **旧式裸模板**(不含 `="`,如 `playseek=…`):按 `catchup_type` 包装,且多个裸模板会
-  **合并回单条** `catchup="<类型>" catchup-source="?a or ?b"`(与 1.0.0 产物逐字节一致)
+- **完整属性片段**(含 `="`):原样写入 `#EXTINF`,每项自成一组、顺序不变。要「回看 + 时移并列」就用这种写法
+- **旧式裸模板**(不含 `="`,如 `playseek=…`):按参数名**自动分流**成两组,无需改配置即可同时拿到回看与时移
+  - 含 `starttime` 的 → `shift="<catchup_type>"  shift-source="?…"`
+  - 其余(含 `playseek`) → `catchup="<catchup_type>"  catchup-source="?…"`
+  - 同一组内多个模板仍用 `" or ?"` 连接,但**不再跨语义合并**
 
 时间占位符(按类型默认模板如下,也可自行改写):
 
@@ -88,9 +90,9 @@ m3u 里的 `tvg-logo` 指向本地缓存地址(基址 = `http_pub_base`,留空�
 
 - 本平台(HMS/河北电信)实测回看:`catchup="append"` + `?playseek=YYYYMMDDHHmmss-YYYYMMDDHHmmss`;
   时移:`shift="append"` + `?starttime=YYYYMMDDHHmmss-YYYYMMDDHHmmss`
-- 升级兼容:旧配置里若写的是裸模板(如 `playseek=…`、`starttime=…`),多个裸模板会合并回
-  单条 `catchup="<类型>" catchup-source="?a or ?b"`,与 1.0.0 产物逐字节一致;要启用
-  「回看 + 时移并列」需写成带属性名的完整片段(默认配置已是这种写法)
+- 升级兼容:旧配置里若写的是裸模板(如 `playseek=…`、`starttime=…`),1.1.0 起会按参数名
+  自动分流成 `catchup=` 与 `shift=` 两组,**无需改配置即可同时启用回看与时移**
+  (1.0.0 会把它们合并进同一条 `catchup-source`,因此没有 `shift=` 属性、时移拿不到)
 - 排错:回放地址里仍能看到 `${(b)...}`/`{utc:...}` 原文 → 该频道没带上回放属性模板,
   或播放器没走回看/时移流程;地址生成对但播不了 → 源端不认这个参数名或时间格式(换 `playseek`
   与 `starttime`、换本地时间与 UTC 试试)
@@ -122,14 +124,16 @@ opkg install iptv-helper_*.ipk luci-app-iptv-helper_*.ipk
 - `http://<路由器>/iptv/NetReplay.m3u`、`PL.xml.gz`、`channels.txt`
 - 台标:`http://<路由器>/iptv/logo/<UserChannelID>.png`
 
-### 从 1.0.0 升级(注意配置合并)
+### 从 1.0.0 升级
 
 `/etc/config/iptv-helper` 已声明为 `conffiles`,升级**不会**覆盖你已有的配置,
 包内新默认值会落在 `/etc/config/iptv-helper-opkg` 供对照。
 
-但正因为不覆盖,旧配置里的 `catchup_params` 是两行裸模板,按兼容规则仍会合并成
-旧的单条 `catchup="append" catchup-source="?… or ?…"`,**不会自动出现 `shift=` 时移属性**。
-要启用「回看 + 时移并列」,把这两项换成新写法:
+**旧配置无需改动即可生效**:1.1.0 起,`catchup_params` 里的裸模板(`playseek=…`、`starttime=…`)
+会按参数名自动分流成 `catchup=` 与 `shift=` 两组,时移直接可用;
+台标缓存对应的 `cache_logo` 选项**不存在时默认开启**,老配置也不用加。
+
+若想把手改过的配置显式写清楚(便于对照与排错),可以换成完整属性片段:
 
 ```sh
 uci -q delete iptv-helper.catchup_params
@@ -138,10 +142,32 @@ uci add_list iptv-helper.catchup_params='shift="append" shift-source="?starttime
 uci commit iptv-helper && /etc/init.d/iptv-helper restart
 ```
 
-(或直接对照 `/etc/config/iptv-helper-opkg` 里的对应两行。)
-
 > 1.0.0-1 及更早的 ipk **没有**声明 conffiles,升级会把配置整份覆盖成默认值 ——
 > 从 1.1.0-2 起已修正;若从更早版本升级,请先手工备份 `/etc/config/iptv-helper`。
+
+### 装哪个 ipk?先确认设备架构
+
+**装不上、报 `incompatible with the architectures configured`,一律是下错了架构的文件。**
+Release 里 4 个架构是并列的,挑错了 opkg 会直接拒绝(跟有没有装过旧版无关,
+卸载旧版也解决不了)。在设备上先查:
+
+```sh
+opkg print-architecture        # 或: grep DISTRIB_ARCH /etc/openwrt_release
+```
+
+| 设备架构 | 该下载的文件 |
+|---|---|
+| `aarch64_cortex-a53` | `iptv-helper_<版本>_aarch64_cortex-a53.ipk` |
+| `mipsel_24kc` | `iptv-helper_<版本>_mipsel_24kc.ipk` |
+| `x86_64` | `iptv-helper_<版本>_x86_64.ipk` |
+| `aarch64_generic` | `iptv-helper_<版本>_aarch64_generic.ipk` |
+
+> **Kwrt / 多数国产固件的 aarch64 设备白名单里只有 `aarch64_cortex-a53`,没有 `aarch64_generic`**
+> —— 这类设备用 `aarch64_generic` 那个包**永远装不上**(名字里的 "generic" 不代表通用)。
+> `aarch64_generic` 只对应官方 OpenWrt 的 `armsr/armv8` 目标。
+
+LuCI 里「系统 → 软件包 → 上传软件包…」传对应的 ipk 即可;
+「更新列表 / 更新所有软件包」读的是官方源,**不会**出现本项目的新版本。
 
 ## 回看说明
 

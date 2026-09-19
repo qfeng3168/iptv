@@ -780,33 +780,44 @@ static std::string catchup_fallback(const std::string &type, const Config &cfg) 
 // 把 catchup_params 各项归一成「属性组」。每项两种写法:
 //   1) 完整属性片段(含 =\" ): catchup="append" catchup-source="?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
 //      或 shift="append" shift-source="?starttime=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
-//      -> 自成一组,原样保留。多组用单个空格连接(不使用 " or "),因此回看与时移可同时存在:
-//         catchup="append" catchup-source="?playseek=..." shift="append" shift-source="?starttime=..."
-//   2) 旧式裸模板:   playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}
-//      -> 全部裸模板合并回「单条」catchup="<type>" catchup-source="?a or ?b",
-//         与 1.0.0 的产物逐字节一致:老配置升级后 m3u 语义不变,
-//         且不会退化成同一行并列两个 catchup="append"(后者 playseek 会被 starttime 顶掉)。
+//      -> 自成一组,原样保留、顺序不变,可自由并列回看与时移两套语义。
+//   2) 旧式裸模板(不含 =\" ): playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}
+//      -> 按参数名分流到两组:
+//           含 starttime 的     -> shift="<type>"    shift-source="?本组各项用 \" or ?\" 连接"
+//           其余(playseek 等) -> catchup="<type>"  catchup-source="?本组各项用 \" or ?\" 连接"
+//     这是 1.1.0 起的**行为变更**:1.0.0 会把裸模板全部塞进同一条 catchup-source 用 " or " 连接,
+//     结果是同一行里没有 shift= 属性、时移根本拿不到 —— 老配置升级后等于「功能没生效」。
+//     分流后老配置不改一个字就能同时拿到回看与时移。裸模板组插回该组首个成员在原文中的位置。
 static std::vector<std::string> catchup_groups(const std::vector<std::string> &params,
                                                const std::string &type) {
-    std::vector<std::string> groups, naked;
-    size_t naked_at = std::string::npos; // 合并后的裸模板组插回首个裸模板的位置
+    std::vector<std::string> entries;      // 输出顺序,裸模板组先占空位
+    std::vector<std::string> watch, shift; // 回看(playseek 等) / 时移(starttime) 裸模板
+    size_t watch_at = std::string::npos, shift_at = std::string::npos;
     for (size_t i = 0; i < params.size(); ++i) {
         std::string t = trim(params[i]);
         if (t.empty()) continue;
-        if (t.find("=\"") != std::string::npos) { groups.push_back(t); continue; } // 完整属性片段
+        if (t.find("=\"") != std::string::npos) { entries.push_back(t); continue; } // 完整属性片段
         if (starts_with(t, "?")) t.erase(0, 1);
-        if (naked.empty()) naked_at = groups.size();
-        naked.push_back(t);
+        if (t.find("starttime") != std::string::npos) {
+            if (shift.empty()) { shift_at = entries.size(); entries.push_back(std::string()); }
+            shift.push_back(t);
+        } else {
+            if (watch.empty()) { watch_at = entries.size(); entries.push_back(std::string()); }
+            watch.push_back(t);
+        }
     }
-    if (!naked.empty()) {
+    // 同一组内多个模板仍用 " or ?" 连接;不再跨语义合并(那正是时移丢失的原因)
+    if (watch_at != std::string::npos) {
         std::string src;
-        for (size_t i = 0; i < naked.size(); ++i) src += (i ? " or ?" : "?") + naked[i];
-        // 属性名与兜底一致(shift 类型产出 shift/shift-source),避免与自身契约冲突
-        const std::string nm = catchup_attr_name(type);
-        groups.insert(groups.begin() + (naked_at == std::string::npos ? 0 : naked_at),
-                      nm + "=\"" + type + "\" " + nm + "-source=\"" + src + "\"");
+        for (size_t i = 0; i < watch.size(); ++i) src += (i ? " or ?" : "?") + watch[i];
+        entries[watch_at] = "catchup=\"" + type + "\" catchup-source=\"" + src + "\"";
     }
-    return groups;
+    if (shift_at != std::string::npos) {
+        std::string src;
+        for (size_t i = 0; i < shift.size(); ++i) src += (i ? " or ?" : "?") + shift[i];
+        entries[shift_at] = "shift=\"" + type + "\" shift-source=\"" + src + "\"";
+    }
+    return entries;
 }
 
 static std::string gen_catchup_attr(const Config &cfg) {

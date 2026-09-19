@@ -193,10 +193,11 @@ end
 o = s:taboption("files", Value, "epg_name", translate("EPG 名称"))
 o.default = "IPTV EPG"
 
-o = s:taboption("gen", ListValue, "catchup_type", translate("catchup 类型(旧式裸模板用)"),
+o = s:taboption("gen", ListValue, "catchup_type", translate("catchup 取值(写入 catchup=/shift= 的值)"),
 	translate("append = 回看(参数追加在频道 URL 后,RTSP PLTV 用);shift = 时移(秒级时间戳);" ..
 		"default = HTTP/HLS(UTC + T);flussonic = 开始 + 时长;custom = 完全按模板原样输出。" ..
-		"仅用于包装旧式裸模板与留空时的兜底;片段自带属性名时以片段为准"))
+		"本值写入 catchup=\"<本值>\" / shift=\"<本值>\",也用于裸模板分流与留空时的兜底;" ..
+		"片段自带属性名时以片段为准"))
 o:value("append", "append(回看,推荐)")
 o:value("shift", "shift(时移)")
 o:value("default", "default(HTTP/HLS)")
@@ -221,7 +222,8 @@ o = s:taboption("gen", DynamicList, "catchup_params", translate("回看 / 时移
 		"catchup=\"append\" catchup-source=\"?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}\" ;" ..
 		"shift=\"append\" shift-source=\"?starttime=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}\"。" ..
 		"两项同时保留即可让播放器同时提供回看与时移;想只留一种,删掉对应那一项。" ..
-		"也可只写裸模板(如 playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}),按 catchup 类型自动包装。" ..
+		"也可只写裸模板(如 playseek=…、starttime=…),按参数名自动分流:" ..
+		"含 starttime 的归时移(shift),其余归回看(catchup) —— 老配置无需改动即可同时启用两者。" ..
 		"常用占位符: ${(b)格式}/${(e)格式}(结尾加 |UTC 转 UTC)、" ..
 		"{utc:格式}/{utcend:格式}、{start}/{end}、${timestamp}/${end_timestamp}/${duration}(秒)。" ..
 		"留空则按类型取默认片段"))
