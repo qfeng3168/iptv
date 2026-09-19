@@ -1,0 +1,13 @@
+# 这些文件全部在 Linux 上编译/执行:工作区必须保持 LF。
+# 没有这段配置时,Windows 上 core.autocrlf=true 会把工作区检出成 CRLF,
+# 直接打包出的 ipk 里 init 脚本首行变成 `#!/bin/sh /etc/rc.common\r`,
+# 设备上 procd 加载失败(报 can't open '/etc/rc.common'),服务起不来。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ipk  binary
+*.gz   binary

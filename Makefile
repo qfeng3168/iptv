@@ -2,8 +2,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=iptv-helper
-PKG_VERSION:=1.0.0
-PKG_RELEASE:=1
+PKG_VERSION:=1.1.0
+PKG_RELEASE:=3
 PKG_MAINTAINER:=qfeng3168
 PKG_LICENSE:=MIT
 
@@ -30,6 +30,13 @@ define Package/iptv-helper/description
   All parameters come from /etc/config/iptv-helper (no hardcoding).
 endef
 
+# 配置文件必须声明为 conffiles:否则 opkg 升级时会用包内默认值覆盖它,
+# 用户填的鉴权表单 / EPG 地址 / 边缘服务器等全部丢失。
+# 声明后升级保留原配置,新默认值落在 /etc/config/iptv-helper-opkg 供对照合并。
+define Package/iptv-helper/conffiles
+/etc/config/iptv-helper
+endef
+
 define Build/Prepare
 	$(INSTALL_DIR) $(PKG_BUILD_DIR)
 	$(CP) $(CURDIR)/src/* $(PKG_BUILD_DIR)/
@@ -47,7 +54,7 @@ define Package/iptv-helper/install
 	$(INSTALL_CONF) $(CURDIR)/files/iptv-helper.config $(1)/etc/config/iptv-helper
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/iptv-helper.init $(1)/etc/init.d/iptv-helper
-	$(INSTALL_DIR) $(1)/www/iptv
+	$(INSTALL_DIR) $(1)/www/iptv/logo
 endef
 
 # 安装即自启并启动服务

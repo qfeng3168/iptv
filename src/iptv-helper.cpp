@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <ctime>
 #include <cstdarg>
+#include <cerrno>
 #include <csignal>
 #include <string>
 #include <vector>
@@ -31,7 +32,9 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <direct.h>
 #  pragma comment(lib, "ws2_32.lib")
+#  define MKDIR(p) _mkdir(p)
 #  define CLOSESOCK closesocket
 #  define SOCKOPT const char
 #  define SOCKLEN int
@@ -47,10 +50,12 @@ static inline void closelog() {}
 #  include <errno.h>
 #  include <sys/socket.h>
 #  include <sys/time.h>
+#  include <sys/stat.h>
 #  include <syslog.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <netdb.h>
+#  define MKDIR(p) mkdir(p, 0755)
 #  define CLOSESOCK close
 #  define SOCKOPT void
 #  define SOCKLEN socklen_t
@@ -160,7 +165,8 @@ struct Config {
                 if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
                 if (islist) {
                     auto it = kv.find(key);
-                    kv[key] = (it == kv.end() ? "" : it->second + " ") + val;
+                    // 用 '\n' 而非空格做内部拼接:list 项本身可能含空格(如 catchup 属性片段)
+                    kv[key] = (it == kv.end() ? "" : it->second + "\n") + val;
                 } else kv[key] = val;
             }
         }
@@ -181,12 +187,97 @@ struct Config {
     }
     std::vector<std::string> getlist(const std::string &k) const {
         std::vector<std::string> out;
-        for (auto &s : split(get(k), ' ')) if (!trim(s).empty()) out.push_back(trim(s));
+        for (auto &s : split(get(k), '\n')) if (!trim(s).empty()) out.push_back(trim(s));
         return out;
     }
 };
 
 static Config g_cfg;
+
+// ---------------------------------------------------------------- 路径 / 图片小工具
+static bool make_dir(const std::string &path) {
+    if (path.empty()) return false;
+    if (MKDIR(path.c_str()) == 0) return true;
+    return errno == EEXIST;
+}
+// 递归建目录(/www/iptv 与 C:/x/y 都能处理)
+static bool make_dirs(const std::string &path) {
+    if (path.empty()) return false;
+    std::string cur;
+    size_t i = 0;
+    if (path.size() >= 2 && path[1] == ':') { cur = path.substr(0, 2); i = 2; } // 盘符
+    for (; i < path.size(); ++i) {
+        if (path[i] != '/' && path[i] != '\\') { cur += path[i]; continue; }
+        if (!cur.empty() && cur.back() != ':') make_dir(cur);
+        cur += '/';
+    }
+    // 结尾分隔符先去掉:Windows 上 _mkdir 对 "D:/a/b/" 这类带尾分隔符的路径不生效
+    while (!cur.empty() && (cur.back() == '/' || cur.back() == '\\')) cur.pop_back();
+    return make_dir(cur);
+}
+static bool file_nonempty(const std::string &path) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    // fseek/ftell 都要判返回值:定位失败时 ftell 的结果不可信(可能误判"非空")
+    bool ok = (fseek(f, 0, SEEK_END) == 0);
+    long n = ok ? ftell(f) : -1;
+    fclose(f);
+    return ok && n > 0;
+}
+// 文件名安全化(台标按 UserChannelID 命名,只保留字母数字 _ -)。
+// 长度上限 111:异常超长输入直接截断,避免文件名超出 NAME_MAX 或成倍的无谓分配;
+// 留 17 字符给截断后缀(下划线 + 16 位十六进制哈希),保证最终文件名 ≤ 128。
+static const size_t SAFE_NAME_BASE_MAX = 111;
+static std::string safe_name(const std::string &s) {
+    std::string o;
+    for (unsigned char c : s) {
+        if (o.size() >= SAFE_NAME_BASE_MAX) break;
+        o += (isalnum(c) || c == '-' || c == '_') ? (char)c : '_';
+    }
+    if (o.empty()) return std::string("ch");
+    if (s.size() > o.size()) { // 被截断:追加全名哈希,避免长 ID 前缀相同而互相覆盖
+        // FNV-1a 64 位:offset basis 14695981039346656037 / prime 1099511628211。
+        // 32 位在数百频道量级下碰撞概率不可忽略(生日问题,1/2^32),64 位可视为无碰撞
+        static constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
+        static constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+        uint64_t h = FNV_OFFSET_BASIS;
+        for (unsigned char c : s) { h ^= c; h *= FNV_PRIME; }
+        char buf[24];
+        snprintf(buf, sizeof(buf), "_%016llx", (unsigned long long)h);
+        o += buf;
+    }
+    return o;
+}
+// 按魔数判断图片类型(不信任 URL 后缀,防止把错误页当图片存下来)
+static std::string sniff_image_ext(const std::string &b) {
+    if (b.size() > 8 && (unsigned char)b[0] == 0x89 && b.compare(1, 3, "PNG") == 0) return "png";
+    if (b.size() > 3 && (unsigned char)b[0] == 0xFF && (unsigned char)b[1] == 0xD8) return "jpg";
+    if (b.size() > 6 && b.compare(0, 3, "GIF") == 0) return "gif";
+    if (b.size() > 12 && b.compare(0, 4, "RIFF") == 0 && b.compare(8, 4, "WEBP") == 0) return "webp";
+    return "";
+}
+// 生成物对外访问基址 = 站点根(http_pub_base,留空则用本机 LAN IP) + web 路径。
+// web 路径 = out_dir 里最后一个 "/www" 之后的部分(/www/iptv -> /iptv),与 LuCI 下载地址算法一致。
+static std::string web_base_of(const Config &cfg, const std::string &lan_ip) {
+    std::string site = trim(cfg.get("http_pub_base"));
+    if (site.empty()) site = "http://" + lan_ip;
+    while (site.size() > 1 && site.back() == '/') site.pop_back();
+    std::string wp = cfg.get("out_dir", "/www/iptv");
+    size_t p = wp.rfind("/www");
+    if (p != std::string::npos) {
+        std::string rest = wp.substr(p + 4);
+        if (rest.empty() || rest[0] == '/') wp = rest; // "/mnt/wwwroot" 这类不动
+    } else {
+        // out_dir 不在 /www 下(uhttpd 根之外):web 路径无法推导,只用站点根本身
+        wp.clear();
+    }
+    while (wp.size() > 1 && wp.back() == '/') wp.pop_back();
+    if (wp == "/") wp.clear();
+    // http_pub_base 已含 web 路径(如 http://host/iptv)时不再重复拼接
+    if (!wp.empty() && site.size() >= wp.size() &&
+        site.compare(site.size() - wp.size(), wp.size(), wp) == 0) return site;
+    return site + wp;
+}
 
 // ---------------------------------------------------------------- socket 小工具
 static void sock_set_timeout(int fd, int seconds) {
@@ -267,9 +358,59 @@ static std::string detect_lan_ip(const Config &cfg) {
 // ---------------------------------------------------------------- HTTP 客户端(带 cookie)
 struct HttpResp { int status = 0; std::string body; };
 
+// 解析 http://host[:port]/path(台标 URL)
+// 解析 URL 里的 "host[:port]" 段。host 支持方括号 IPv6 字面量([::1]:8080);
+// 端口缺失或非法(含 "80abc" 这类半截数字)时回落 def_port;未加方括号的 IPv6 无法与
+// host:port 区分,直接判为非法。返回 false 表示该 URL 不可用。
+static bool parse_host_port(const std::string &auth, std::string &host, int &port, int def_port = 80) {
+    port = def_port;
+    std::string hpart, pstr;
+    if (!auth.empty() && auth[0] == '[') {
+        size_t close = auth.find(']');
+        if (close == std::string::npos) return false;
+        hpart = auth.substr(1, close - 1); // 去掉方括号,getaddrinfo 接受裸地址
+        if (close + 1 < auth.size()) {
+            if (auth[close + 1] != ':') return false;
+            pstr = auth.substr(close + 2);
+        }
+    } else {
+        size_t c = auth.find(':');
+        if (c == std::string::npos) hpart = auth;
+        else { hpart = auth.substr(0, c); pstr = auth.substr(c + 1); }
+        if (hpart.find(':') != std::string::npos) return false; // 未加方括号的 IPv6
+    }
+    if (hpart.empty()) return false;
+    host = hpart;
+    if (pstr.empty()) return true;
+    // 用 strtol 严格解析,避免 atoi 对 "80abc" 之类的宽松截断与溢出未定义行为
+    char *end = nullptr;
+    long pv = strtol(pstr.c_str(), &end, 10);
+    if (end && *end == '\0' && pv > 0 && pv <= 65535) port = (int)pv;
+    return true;
+}
+
+static bool parse_http_url(const std::string &url, std::string &host, int &port, std::string &path) {
+    size_t a = url.find("://");
+    if (a == std::string::npos) return false;
+    a += 3;
+    size_t b = url.find('/', a);
+    std::string auth = b == std::string::npos ? url.substr(a) : url.substr(a, b - a);
+    path = b == std::string::npos ? "/" : url.substr(b);
+    return parse_host_port(auth, host, port, 80);
+}
+
 class HttpClient {
 public:
     std::map<std::string, std::string> cookies;
+    // GET(二进制安全,台标下载用)
+    HttpResp get(const std::string &host, int port, const std::string &path, int timeout = 15) {
+        std::string req = "GET " + path + " HTTP/1.1\r\n";
+        req += "Host: " + host + ":" + std::to_string(port) + "\r\n";
+        std::string ck = cookie_header();
+        if (!ck.empty()) req += "Cookie: " + ck + "\r\n";
+        req += "User-Agent: iptv-helper\r\nAccept: image/*,*/*\r\nConnection: close\r\n\r\n";
+        return roundtrip(host, port, req, timeout);
+    }
     HttpResp post(const std::string &host, int port, const std::string &path,
                   const std::string &body, const std::string &ctype, int timeout = 60) {
         std::string req = "POST " + path + " HTTP/1.1\r\n";
@@ -336,6 +477,19 @@ private:
     }
 };
 
+// 下载一个小文件(台标图片),成功时 out 为原始字节
+static bool http_fetch(HttpClient &hc, const std::string &url, std::string &out) {
+    std::string host, path; int port = 80;
+    if (!parse_http_url(url, host, port, path)) { log_e("bad url: %.100s", url.c_str()); return false; }
+    HttpResp r = hc.get(host, port, path, 15);
+    if (r.status != 200 || r.body.empty()) {
+        log_e("GET %.80s -> status=%d size=%d", url.c_str(), r.status, (int)r.body.size());
+        return false;
+    }
+    out.swap(r.body);
+    return true;
+}
+
 // ---------------------------------------------------------------- EPG 数据模型
 struct Channel { std::string id, name, ucid, logo, group, rtsp, igmp; };
 struct Prog { ll start = 0, end = 0; std::string name; };
@@ -357,8 +511,17 @@ static bool need_reauth(const std::string &ucid) {
            ucid == "501" || ucid == "601" || ucid == "701" || ucid == "801" || ucid == "901";
 }
 
+// 固定以空值发送的鉴权字段:平台不需要,不显示也不参与配置(即使旧配置里残留了值也一律置空)
+static const char *kAuthEmptyFields[] = {"NetUserID", "desktopId", "stbmaker", "ChipID", "VIP", nullptr};
+
+static bool is_auth_empty_field(const char *f) {
+    for (int i = 0; kAuthEmptyFields[i]; ++i)
+        if (strcmp(f, kAuthEmptyFields[i]) == 0) return true;
+    return false;
+}
+
 static std::string auth_body(const Config &cfg) {
-    // 表单字段与值全部来自配置文件
+    // 表单字段与值全部来自配置文件(固定空值字段除外)
     const char *fields[] = {"UserID","Lang","SupportHD","NetUserID","Authenticator","STBType",
         "STBVersion","conntype","STBID","templateName","areaId","userToken","userGroupId",
         "productPackageId","mac","UserField","SoftwareVersion","IsSmartStb","desktopId",
@@ -367,7 +530,8 @@ static std::string auth_body(const Config &cfg) {
     for (int i = 0; fields[i]; ++i) {
         if (i) body += "&";
         body += fields[i];
-        body += "=" + url_encode(cfg.get(fields[i]));
+        std::string v = is_auth_empty_field(fields[i]) ? std::string() : cfg.get(fields[i]);
+        body += "=" + url_encode(v);
     }
     return body;
 }
@@ -503,13 +667,57 @@ static std::vector<std::vector<Prog>> fetch_playbills(HttpClient &hc, const Conf
 }
 
 // ---------------------------------------------------------------- 文件生成
-static bool write_file(const std::string &path, const std::string &data) {
+// 写文件并校验长度:fopen 成功但短写(磁盘满等)同样判失败,并删掉半截文件
+// (fopen("wb") 已截断旧文件,留下半截 .gz 只会让播放器拿到坏数据)。
+// 注意区分两类失败:短写/fflush 失败 = 内容可能不完整 -> 删掉;
+// fclose 失败(此时 fflush 已成功,数据已完整交给内核)= 保留文件,只报错。
+// quiet=true 时不打印成功日志(台标逐个写会刷屏)。
+static bool write_file_ex(const std::string &path, const std::string &data, bool quiet) {
     FILE *f = fopen(path.c_str(), "wb");
-    if (!f) { log_e("write %s failed", path.c_str()); return false; }
-    fwrite(data.data(), 1, data.size(), f);
-    fclose(f);
-    log_i("written %s (%d bytes)", path.c_str(), (int)data.size());
+    if (!f) { log_e("write %s failed: %s", path.c_str(), strerror(errno)); return false; }
+    size_t n = fwrite(data.data(), 1, data.size(), f);
+    bool flushed = (n == data.size()) && (fflush(f) == 0);
+    int rc = fclose(f);
+    if (!flushed) {
+        log_e("write %s failed: short write (%d/%d)", path.c_str(), (int)n, (int)data.size());
+        ::remove(path.c_str());
+        return false;
+    }
+    if (rc != 0) {
+        log_e("write %s: fclose failed (%s), file kept", path.c_str(), strerror(errno));
+        return false;
+    }
+    if (!quiet) log_i("written %s (%d bytes)", path.c_str(), (int)data.size());
     return true;
+}
+static bool write_file(const std::string &path, const std::string &data) {
+    return write_file_ex(path, data, false);
+}
+
+// 静默写(台标批量落盘,不逐条打日志)
+static bool write_file_q(const std::string &path, const std::string &data) {
+    return write_file_ex(path, data, true);
+}
+
+// 台标缓存:把 <url> 存成 <dir>/<stem>.<ext>,返回对外可访问的本地 URL(失败返回空)
+static std::string cache_logo(const std::string &url, HttpClient &hc, const std::string &dir,
+                              const std::string &dir_name, const std::string &web_base,
+                              const std::string &stem, bool reuse, int &downloaded) {
+    static const char *exts[] = {"png", "jpg", "gif", "webp"};
+    if (reuse) {
+        for (const char *e : exts) {
+            std::string p = dir + "/" + stem + "." + e;
+            if (file_nonempty(p)) return web_base + "/" + dir_name + "/" + stem + "." + e;
+        }
+    }
+    std::string body;
+    if (!http_fetch(hc, url, body)) return "";
+    std::string ext = sniff_image_ext(body);
+    if (ext.empty()) { log_e("not an image: %.80s (%d bytes)", url.c_str(), (int)body.size()); return ""; }
+    std::string p = dir + "/" + stem + "." + ext;
+    if (!write_file_q(p, body)) return "";
+    downloaded++;
+    return web_base + "/" + dir_name + "/" + stem + "." + ext;
 }
 
 static std::string extinf(const Channel &ch, const std::string &extra) {
@@ -531,24 +739,118 @@ static std::string gen_live_m3u(const std::vector<Channel> &chs, const std::stri
     return o;
 }
 
+// catchup 属性的安全边界:单段片段长度上限、天数声明上限(留空/0 = 不写入)
+static const size_t CATCHUP_FRAG_MAX = 512;
+static const int    CATCHUP_DAYS_MAX = 365;
+
+static int clamp_int(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// 仅接受 [-]dddd 形式(不含空格、引号等可污染属性串的字符)
+static bool is_signed_int(const std::string &s) {
+    if (s.empty()) return false;
+    size_t i = (s[0] == '-') ? 1 : 0;
+    if (i >= s.size()) return false;
+    for (; i < s.size(); ++i) if (!isdigit((unsigned char)s[i])) return false;
+    return true;
+}
+
+// 属性名跟随语义:时移 => shift / shift-source;其余(回看)=> catchup / catchup-source。
+// 两组属性名必须不同,否则同一行出现重名属性会互相顶掉(旧版把 playseek 顶成了 starttime)。
+static std::string catchup_attr_name(const std::string &type) {
+    return (type == "shift") ? "shift" : "catchup";
+}
+
+// catchup_params 为空时按类型给的兜底片段。
+// 本平台参数对应关系(实测结论):append 回看用 playseek=起-止;时移用 starttime=起-止。
+// 属性名由 catchup_attr_name 决定,属性值即所选类型;模板按类型给默认。
+// default(HTTP/HLS)该平台惯例是 UTC + T 分隔;flussonic 为 开始 + 时长(秒)。
+static std::string catchup_fallback(const std::string &type, const Config &cfg) {
+    std::string fmt = cfg.get("catchup_fmt", "yyyyMMddHHmmss");
+    const bool ts = (type == "shift");
+    const std::string nm = catchup_attr_name(type);
+    std::string tpl;
+    if (ts) tpl = "?starttime=${(b)" + fmt + "}-${(e)" + fmt + "}";
+    else if (type == "flussonic") tpl = "?start=${timestamp}&duration=${duration}";
+    else if (type == "default") tpl = "?starttime=${(b)yyyyMMdd|UTC}T${(b)HHmmss|UTC}"
+                                       "&endtime=${(e)yyyyMMdd|UTC}T${(e)HHmmss|UTC}";
+    else tpl = "?playseek=${(b)" + fmt + "}-${(e)" + fmt + "}"; // append:本平台回看实测可用形态
+    return nm + "=\"" + type + "\" " + nm + "-source=\"" + tpl + "\"";
+}
+
+// 把 catchup_params 各项归一成「属性组」。每项两种写法:
+//   1) 完整属性片段(含 =\" ): catchup="append" catchup-source="?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
+//      或 shift="append" shift-source="?starttime=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
+//      -> 自成一组,原样保留。多组用单个空格连接(不使用 " or "),因此回看与时移可同时存在:
+//         catchup="append" catchup-source="?playseek=..." shift="append" shift-source="?starttime=..."
+//   2) 旧式裸模板:   playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}
+//      -> 全部裸模板合并回「单条」catchup="<type>" catchup-source="?a or ?b",
+//         与 1.0.0 的产物逐字节一致:老配置升级后 m3u 语义不变,
+//         且不会退化成同一行并列两个 catchup="append"(后者 playseek 会被 starttime 顶掉)。
+static std::vector<std::string> catchup_groups(const std::vector<std::string> &params,
+                                               const std::string &type) {
+    std::vector<std::string> groups, naked;
+    size_t naked_at = std::string::npos; // 合并后的裸模板组插回首个裸模板的位置
+    for (size_t i = 0; i < params.size(); ++i) {
+        std::string t = trim(params[i]);
+        if (t.empty()) continue;
+        if (t.find("=\"") != std::string::npos) { groups.push_back(t); continue; } // 完整属性片段
+        if (starts_with(t, "?")) t.erase(0, 1);
+        if (naked.empty()) naked_at = groups.size();
+        naked.push_back(t);
+    }
+    if (!naked.empty()) {
+        std::string src;
+        for (size_t i = 0; i < naked.size(); ++i) src += (i ? " or ?" : "?") + naked[i];
+        // 属性名与兜底一致(shift 类型产出 shift/shift-source),避免与自身契约冲突
+        const std::string nm = catchup_attr_name(type);
+        groups.insert(groups.begin() + (naked_at == std::string::npos ? 0 : naked_at),
+                      nm + "=\"" + type + "\" " + nm + "-source=\"" + src + "\"");
+    }
+    return groups;
+}
+
+static std::string gen_catchup_attr(const Config &cfg) {
+    std::string type = trim(cfg.get("catchup_type", "append"));
+    if (type.empty()) type = "append";
+    std::vector<std::string> params = cfg.getlist("catchup_params");
+    if (params.empty()) params.push_back(catchup_fallback(type, cfg));
+    std::vector<std::string> groups = catchup_groups(params, type);
+    std::string a;
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const std::string &frag = groups[i];
+        // 单段属性上限:防止手改 uci 塞入超长内容把 #EXTINF 整行撑爆(播放器可能直接弃用该行)
+        if (frag.size() > CATCHUP_FRAG_MAX) {
+            log_e("catchup_params[%d] too long (%d > %d), skipped",
+                  (int)i, (int)frag.size(), (int)CATCHUP_FRAG_MAX);
+            continue;
+        }
+        a += " " + frag;
+    }
+    if (a.empty()) {
+        // 所有片段都被超长检查丢弃:补一条汇总日志,避免「自定义模板静默失效」
+        log_e("all catchup_params entries rejected (> %d bytes each), fall back to bare catchup",
+              (int)CATCHUP_FRAG_MAX);
+        a = " catchup=\"" + type + "\"";
+    }
+    // 声明属性统一夹取范围:天数 0/留空 = 不写入
+    int days = clamp_int(cfg.geti("catchup_days", 0), 0, CATCHUP_DAYS_MAX);
+    if (days > 0) a += " catchup-days=\"" + std::to_string(days) + "\"";
+    std::string corr = trim(cfg.get("catchup_correction"));
+    if (!corr.empty()) {
+        // 只允许 [-]整数,其余(含引号/空格)一律丢弃,避免污染属性串
+        if (corr.size() <= 16 && is_signed_int(corr)) a += " catchup-correction=\"" + corr + "\"";
+        else log_e("catchup_correction '%s' is not a plain integer, ignored", corr.c_str());
+    }
+    int ts = clamp_int(cfg.geti("timeshift_days", 0), 0, CATCHUP_DAYS_MAX);
+    if (ts > 0) a += " timeshift=\"" + std::to_string(ts) + "\"";
+    return a;
+}
+
 static std::string gen_replay_m3u(const Config &cfg, const std::vector<Channel> &chs,
                                   const std::string &base, bool catchup) {
     std::string o = "#EXTM3U\n";
     std::string extra;
-    if (catchup) {
-        // catchup-source 支持多源,播放器按 " or " 顺序尝试:
-        // 默认 playseek + starttime 两种时移参数,模板全部来自配置
-        std::vector<std::string> params = cfg.getlist("catchup_params");
-        if (params.empty()) {
-            std::string fmt = cfg.get("catchup_fmt", "yyyyMMddHHmmss");
-            params.push_back("playseek=${(b)" + fmt + "}-${(e)" + fmt + "}");
-        }
-        std::string src;
-        for (size_t i = 0; i < params.size(); ++i) {
-            src += (i ? " or ?" : "?") + params[i];
-        }
-        extra = " catchup=\"append\" catchup-source=\"" + src + "\"";
-    }
+    if (catchup) extra = gen_catchup_attr(cfg);
     for (auto &ch : chs) {
         std::string sp = smil_path(ch);
         if (sp.empty()) continue;
@@ -559,12 +861,14 @@ static std::string gen_replay_m3u(const Config &cfg, const std::vector<Channel> 
 }
 
 static std::string gen_txt(const Config &cfg, const std::vector<Channel> &chs,
-                           const std::string &lan_ip, const std::string &rtsp_self) {
+                           const std::string &lan_ip, const std::string &rtsp_self,
+                           const std::string &web_base) {
     std::string o;
     o += "IPTV channel list  generated: " + now_str() + "\n";
     o += "live(lan):  " + cfg.get("udpxy_lan") + "/udp/<multicast>\n";
     o += "replay(lan): " + rtsp_self + "<smil_path>[?playseek=YYYYMMDDHHMMSS-YYYYMMDDHHMMSS]\n";
-    o += "epg: " + cfg.get("http_pub_base") + "/" + cfg.get("epg_file", "PL.xml") + ".gz\n";
+    o += "epg: " + web_base + "/" + cfg.get("epg_file", "PL.xml") + ".gz\n";
+    o += "logo: " + web_base + "/" + cfg.get("logo_dir", "logo") + "/<userChannelId>.<png|jpg|gif>\n";
     o += std::string(72, '-') + "\n";
     int n = 1;
     for (auto &ch : chs) {
@@ -611,18 +915,22 @@ static uint32_t crc32_of(const std::string &d) {
     return c ^ 0xFFFFFFFFu;
 }
 static std::string gzip_store(const std::string &in) {
-    std::string o = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff";
+    // 注意:含 \x00 的字节串不能用 const char* 构造/追加(会在首个 NUL 截断)
+    static const char hdr[10] = {0x1f, (char)0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, (char)0xff};
+    std::string o(hdr, sizeof(hdr));
     size_t pos = 0;
-    while (pos < in.size()) {
+    do {
         size_t n = std::min<size_t>(65535, in.size() - pos);
         bool last = (pos + n >= in.size());
+        // 最后一块直接标 BFINAL=1,不再追加空的终结块
+        // (BFINAL=1 的数据块后再补 5 字节空块,部分解码器会把它当成 CRC/ISIZE 而报错)。
+        // do-while 保证空输入也至少有 1 个块(空的 BFINAL=1 块),不会产出无块的非 gzip 数据。
         o += (char)(last ? 1 : 0);
         o += (char)(n & 0xFF); o += (char)(n >> 8);
         o += (char)(~n & 0xFF); o += (char)((~n >> 8) & 0xFF);
         o.append(in, pos, n);
         pos += n;
-    }
-    o += "\x01\x00\x00\xff\xff";
+    } while (pos < in.size());
     uint32_t crc = crc32_of(in), isz = (uint32_t)in.size();
     for (int i = 0; i < 4; ++i) o += (char)(crc >> (8 * i));
     for (int i = 0; i < 4; ++i) o += (char)(isz >> (8 * i));
@@ -636,6 +944,20 @@ static bool run_generate(const Config &cfg) {
     if (epg_host.empty()) { log_e("epg_host not configured"); return false; }
 
     log_i("generate start");
+    // 输出路径与对外地址先算好:台标缓存需要用到(logo 目录在 out_dir 下)
+    std::string dir = cfg.get("out_dir", "/www/iptv");
+    // 去掉尾部多余分隔符,避免拼出 "/iptv//logo" 这类路径
+    while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) dir.pop_back();
+    if (!make_dirs(dir)) log_e("mkdir %s failed, writes may fail", dir.c_str());
+    std::string lan_ip = cfg.get("lan_ip");
+    if (lan_ip.empty()) lan_ip = detect_lan_ip(cfg);
+    std::string rtsp_self = "rtsp://" + lan_ip + ":" + std::to_string(cfg.geti("rtsp_port", 554));
+    std::string lan_replay = cfg.get("replay_via", "proxy") == "direct"
+        ? "rtsp://" + cfg.get("edge_host") + ":" + std::to_string(cfg.geti("edge_port", 554))
+        : rtsp_self;
+    std::string web_base = web_base_of(cfg, lan_ip);
+    log_i("out_dir=%s web_base=%s", dir.c_str(), web_base.c_str());
+
     HttpClient hc;
     do_auth(hc, cfg);
     auto list_resp = hc.post(epg_host, epg_port,
@@ -651,11 +973,35 @@ static bool run_generate(const Config &cfg) {
 
     if (cfg.getb("fetch_logo", true)) {
         ll tz = today_zero_ms();
+        // 台标下载到 <out_dir>/<logo_dir>/,m3u 里 tvg-logo 指向本地缓存(不依赖 EPG 服务器)
+        bool cache = cfg.getb("cache_logo", true);
+        bool reuse = cfg.getb("logo_reuse", true);
+        std::string ldir_name = cfg.get("logo_dir", "logo");
+        // logo_dir 来自配置,拒绝路径穿越(.. 或绝对路径/盘符),回退默认值
+        if (ldir_name.find("..") != std::string::npos || ldir_name.find(':') != std::string::npos ||
+            ldir_name.find('/') != std::string::npos || ldir_name.find('\\') != std::string::npos) {
+            log_e("logo_dir '%s' is not a plain subdir name, fallback to 'logo'", ldir_name.c_str());
+            ldir_name = "logo";
+        }
+        std::string ldir = dir + "/" + ldir_name;
+        if (cache) {
+            if (make_dirs(ldir)) log_i("logo dir: %s", ldir.c_str());
+            else { log_e("mkdir %s failed, keep remote logo urls", ldir.c_str()); cache = false; }
+        }
+        int got = 0, downloaded = 0;
         for (size_t i = 0; i < chs.size(); ++i) {
             if (need_reauth(chs[i].ucid)) do_auth(hc, cfg);
-            chs[i].logo = fetch_logo(hc, cfg, chs[i].id, tz);
+            std::string url = fetch_logo(hc, cfg, chs[i].id, tz);
+            if (url.empty()) continue;
+            if (cache) {
+                std::string stem = safe_name(chs[i].ucid.empty() ? chs[i].id : chs[i].ucid);
+                std::string local = cache_logo(url, hc, ldir, ldir_name, web_base, stem, reuse, downloaded);
+                if (!local.empty()) { chs[i].logo = local; got++; }
+                else chs[i].logo = url; // 缓存失败回退远端地址
+            } else chs[i].logo = url;
             if ((i % 50) == 49) log_i("logo %d/%d", (int)i + 1, (int)chs.size());
         }
+        if (cache) log_i("logo cached: %d/%d (new %d)", got, (int)chs.size(), downloaded);
     }
 
     std::map<std::string, std::vector<std::vector<Prog>>> playbills;
@@ -665,23 +1011,18 @@ static bool run_generate(const Config &cfg) {
         if ((i % 50) == 49) log_i("playbill %d/%d", (int)i + 1, (int)chs.size());
     }
 
-    std::string dir = cfg.get("out_dir", "/www/iptv");
-    std::string lan_ip = cfg.get("lan_ip");
-    if (lan_ip.empty()) lan_ip = detect_lan_ip(cfg);
-    std::string rtsp_self = "rtsp://" + lan_ip + ":" + std::to_string(cfg.geti("rtsp_port", 554));
-    std::string lan_replay = cfg.get("replay_via", "proxy") == "direct"
-        ? "rtsp://" + cfg.get("edge_host") + ":" + std::to_string(cfg.geti("edge_port", 554))
-        : rtsp_self;
-
-    write_file(dir + "/" + cfg.get("lanlive_file", "LanLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_lan")));
+    // 写盘失败(磁盘满/无权限/目录不存在)不能静默:逐个写,最后汇总
+    bool ok = true;
+    ok &= write_file(dir + "/" + cfg.get("lanlive_file", "LanLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_lan")));
     // 内网回看同样带 catchup(playseek)时间戳,配合节目单可点播回放
-    write_file(dir + "/" + cfg.get("lanreplay_file", "LanReplay.m3u"), gen_replay_m3u(cfg, chs, lan_replay, cfg.getb("lan_catchup", true)));
-    write_file(dir + "/" + cfg.get("netlive_file", "NetLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_pub")));
-    write_file(dir + "/" + cfg.get("netreplay_file", "NetReplay.m3u"), gen_replay_m3u(cfg, chs, cfg.get("replay_pub"), true));
-    write_file(dir + "/" + cfg.get("txt_file", "channels.txt"), gen_txt(cfg, chs, lan_ip, rtsp_self));
+    ok &= write_file(dir + "/" + cfg.get("lanreplay_file", "LanReplay.m3u"), gen_replay_m3u(cfg, chs, lan_replay, cfg.getb("lan_catchup", true)));
+    ok &= write_file(dir + "/" + cfg.get("netlive_file", "NetLive.m3u"), gen_live_m3u(chs, cfg.get("udpxy_pub")));
+    ok &= write_file(dir + "/" + cfg.get("netreplay_file", "NetReplay.m3u"), gen_replay_m3u(cfg, chs, cfg.get("replay_pub"), true));
+    ok &= write_file(dir + "/" + cfg.get("txt_file", "channels.txt"), gen_txt(cfg, chs, lan_ip, rtsp_self, web_base));
     std::string xml = gen_epg_xml(cfg, chs, playbills);
-    write_file(dir + "/" + cfg.get("epg_file", "PL.xml"), xml);
-    write_file(dir + "/" + cfg.get("epg_file", "PL.xml") + ".gz", gzip_store(xml));
+    ok &= write_file(dir + "/" + cfg.get("epg_file", "PL.xml"), xml);
+    ok &= write_file(dir + "/" + cfg.get("epg_file", "PL.xml") + ".gz", gzip_store(xml));
+    if (!ok) { log_e("generate finished with write errors, check %s", dir.c_str()); return false; }
     log_i("generate done");
     return true;
 }
@@ -789,10 +1130,7 @@ static bool host_port_of(const std::string &url, std::string &host, int &port, i
     a += 7;
     size_t b = url.find('/', a);
     std::string auth = b == std::string::npos ? url.substr(a) : url.substr(a, b - a);
-    size_t c = auth.find(':');
-    if (c == std::string::npos) { host = auth; port = def_port; }
-    else { host = auth.substr(0, c); port = atoi(auth.c_str() + c + 1); }
-    return !host.empty();
+    return parse_host_port(auth, host, port, def_port);
 }
 
 struct RtspProxy {

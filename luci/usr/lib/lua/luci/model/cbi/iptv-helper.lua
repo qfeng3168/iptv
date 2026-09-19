@@ -65,6 +65,22 @@ o.default = "/www/iptv"
 o = s:taboption("gen", Flag, "fetch_logo", translate("抓取台标"))
 o.default = "1"
 
+o = s:taboption("gen", Flag, "cache_logo", translate("台标缓存到本地"),
+	translate("下载到 <输出目录>/<台标子目录>/,m3u 的 tvg-logo 指向本地缓存;失败时回退远端地址"))
+o.default = "1"
+
+o = s:taboption("gen", Value, "logo_dir", translate("台标子目录"))
+o.default = "logo"
+o.datatype = "maxlength(64)"
+o:depends("cache_logo", "1")
+o:depends("fetch_logo", "1")
+
+o = s:taboption("gen", Flag, "logo_reuse", translate("复用已缓存台标"),
+	translate("已存在则不重复下载(关闭后每次生成都重新下载)"))
+o.default = "1"
+o:depends("cache_logo", "1")
+o:depends("fetch_logo", "1")
+
 o = s:taboption("gen", Value, "history_days", translate("节目单回看天数"))
 o.datatype = "uinteger"
 o.default = "6"
@@ -87,14 +103,15 @@ btn.write = function(self, section)
 end
 
 -- ============ 鉴权 ============
+-- 注意:NetUserID / desktopId / stbmaker / ChipID / VIP 不再在本页显示,取值固定为空。
+--       它们在 auth_body() 中仍以空值随鉴权表单提交(字段存在但值为空)。
+--       若某平台确实需要非空值,请改代码;手工 uci set 会在本页保存时被重写覆盖。
 local auth_keys = {
 	{"UserID", "UserID"}, {"Authenticator", "Authenticator"},
 	{"STBType", "STBType"}, {"STBVersion", "STBVersion"},
 	{"STBID", "STBID"}, {"templateName", "templateName"},
 	{"areaId", "areaId"}, {"userToken", "userToken"},
 	{"mac", "mac"}, {"SoftwareVersion", "SoftwareVersion"},
-	{"NetUserID", "NetUserID"}, {"desktopId", "desktopId"},
-	{"stbmaker", "stbmaker"}, {"ChipID", "ChipID"}, {"VIP", "VIP"},
 }
 for _, kv in ipairs(auth_keys) do
 	o = s:taboption("auth", Value, kv[1], translate(kv[2]))
@@ -176,10 +193,50 @@ end
 o = s:taboption("files", Value, "epg_name", translate("EPG 名称"))
 o.default = "IPTV EPG"
 
-o = s:taboption("files", Value, "catchup_fmt", translate("catchup 时间格式(兜底)"))
-o.default = "yyyyMMddHHmmss"
+o = s:taboption("gen", ListValue, "catchup_type", translate("catchup 类型(旧式裸模板用)"),
+	translate("append = 回看(参数追加在频道 URL 后,RTSP PLTV 用);shift = 时移(秒级时间戳);" ..
+		"default = HTTP/HLS(UTC + T);flussonic = 开始 + 时长;custom = 完全按模板原样输出。" ..
+		"仅用于包装旧式裸模板与留空时的兜底;片段自带属性名时以片段为准"))
+o:value("append", "append(回看,推荐)")
+o:value("shift", "shift(时移)")
+o:value("default", "default(HTTP/HLS)")
+o:value("flussonic", "flussonic(开始+时长)")
+o:value("custom", "custom(完全按模板)")
+o.default = "append"
 
-o = s:taboption("gen", DynamicList, "catchup_params", translate("catchup 参数模板"),
-	translate("多值,生成 catchup-source 后按顺序用 \" or \" 连接,播放器逐个尝试。变量: ${(b)yyyyMMddHHmmss} 起始、${(e)yyyyMMddHHmmss} 结束"))
+o = s:taboption("gen", Value, "catchup_fmt", translate("catchup 时间格式(兜底)"),
+	translate("仅当 catchup 属性片段留空、回落到类型默认模板时生效;" ..
+		"仅 append / shift / custom 会用到该格式(它们的时间串由本项拼出)," ..
+		"default / flussonic 的默认模板是固定写法,不读此项。" ..
+		"切换 catchup 类型后旧值仍保留在此项,如需重置请手动清空"))
+o.default = "yyyyMMddHHmmss"
+o.datatype = "maxlength(64)"
+o:depends("catchup_type", "append")
+o:depends("catchup_type", "shift")
+o:depends("catchup_type", "custom")
+
+o = s:taboption("gen", DynamicList, "catchup_params", translate("回看 / 时移 属性片段"),
+	translate("每项原样写入 #EXTINF,片段之间用单个空格连接。" ..
+		"回看与时移是两套并列语义,属性名必须分开写(catchup / shift),否则同一行出现重名属性会互相顶掉:" ..
+		"catchup=\"append\" catchup-source=\"?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}\" ;" ..
+		"shift=\"append\" shift-source=\"?starttime=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}\"。" ..
+		"两项同时保留即可让播放器同时提供回看与时移;想只留一种,删掉对应那一项。" ..
+		"也可只写裸模板(如 playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}),按 catchup 类型自动包装。" ..
+		"常用占位符: ${(b)格式}/${(e)格式}(结尾加 |UTC 转 UTC)、" ..
+		"{utc:格式}/{utcend:格式}、{start}/{end}、${timestamp}/${end_timestamp}/${duration}(秒)。" ..
+		"留空则按类型取默认片段"))
+o.datatype = "maxlength(512)"
+
+o = s:taboption("gen", Value, "catchup_days", translate("可回看天数声明 catchup-days"),
+	translate("0~365;留空或填 0 则不写入"))
+o.datatype = "uinteger, range(0,365)"
+
+o = s:taboption("gen", Value, "timeshift_days", translate("可时移天数声明 timeshift"),
+	translate("0~365;留空或填 0 则不写入。部分播放器读此字段"))
+o.datatype = "uinteger, range(0,365)"
+
+o = s:taboption("gen", Value, "catchup_correction", translate("时间偏移 catchup-correction"),
+	translate("如 -10800 表示减 3 小时;仅接受整数,留空不写入"))
+o.datatype = "integer, maxlength(16)"
 
 return m
