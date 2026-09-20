@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=iptv-helper
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 PKG_MAINTAINER:=qfeng3168
 PKG_LICENSE:=MIT
 
@@ -58,11 +58,13 @@ define Package/iptv-helper/install
 endef
 
 # 安装即自启并启动服务
+# 关键: 升级/重装时用 restart 而非 start。procd 的 start 对已运行实例是 no-op,
+# 若只 start,新二进制落盘后内存里仍是旧进程,"上传安装不生效"。
 define Package/iptv-helper/postinst
 #!/bin/sh
 [ -n "$$IPKG_INSTROOT" ] || {
 	/etc/init.d/iptv-helper enable
-	/etc/init.d/iptv-helper start
+	/etc/init.d/iptv-helper restart
 }
 exit 0
 endef

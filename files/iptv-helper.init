@@ -14,5 +14,7 @@ start_service() {
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 0
 	procd_set_param stderr 0
+	# 监听配置变更: LuCI "保存并应用" / reload_config 时自动重启以加载新配置
+	procd_set_param file /etc/config/iptv-helper
 	procd_close_instance
 }
