@@ -342,7 +342,14 @@ static std::string local_ip_of(int fd) {
     if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0) return "127.0.0.1";
     char buf[64] = {0};
     if (ss.ss_family == AF_INET) inet_ntop(AF_INET, &((struct sockaddr_in *)&ss)->sin_addr, buf, sizeof(buf));
-    else inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&ss)->sin6_addr, buf, sizeof(buf));
+    else {
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&ss;
+        // 双栈监听下 v4 客户端进来是 v4-mapped(::ffff:x.x.x.x),归一化成纯 v4
+        if (IN6_IS_ADDR_V4MAPPED(&v6->sin6_addr)) {
+            struct in_addr v4; memcpy(&v4.s_addr, &v6->sin6_addr.s6_addr[12], 4);
+            inet_ntop(AF_INET, &v4, buf, sizeof(buf));
+        } else inet_ntop(AF_INET6, &v6->sin6_addr, buf, sizeof(buf));
+    }
     return buf;
 }
 // 本机出口 IP(用于生成指向本机代理的 URL)
@@ -1065,7 +1072,7 @@ struct RtspSess {
     int up_port = 0;
     int udp_rtp = -1, udp_rtcp = -1;
     int rtp_port = 0, rtcp_port = 0;
-    uint32_t client_addr4 = 0;
+    struct sockaddr_in6 client_addr6{}; // 对端地址(v4 客户端为 v4-mapped ::ffff:x.x.x.x)
     bool udp = false;
     std::string local_ip;
     std::mutex up_mtx; // 上游 fd 读写保护
@@ -1297,9 +1304,9 @@ struct RtspProxy {
             }
             if (s->udp) {
                 int rp = 0, cp = 0;
-                struct sockaddr_in sa; memset(&sa, 0, sizeof(sa)); SOCKLEN sl = sizeof(sa);
-                if (getsockname(s->udp_rtp, (struct sockaddr *)&sa, &sl) == 0) rp = ntohs(sa.sin_port);
-                if (getsockname(s->udp_rtcp, (struct sockaddr *)&sa, &sl) == 0) cp = ntohs(sa.sin_port);
+                struct sockaddr_in6 sa; memset(&sa, 0, sizeof(sa)); SOCKLEN sl = sizeof(sa);
+                if (getsockname(s->udp_rtp, (struct sockaddr *)&sa, &sl) == 0) rp = ntohs(sa.sin6_port);
+                if (getsockname(s->udp_rtcp, (struct sockaddr *)&sa, &sl) == 0) cp = ntohs(sa.sin6_port);
                 char tr[256];
                 snprintf(tr, sizeof(tr), "Transport: RTP/AVP;unicast;client_port=%d-%d;source=%s;server_port=%d-%d",
                          s->rtp_port, s->rtcp_port, s->local_ip.c_str(), rp, cp);
@@ -1366,11 +1373,11 @@ struct RtspProxy {
             int k = (int)recv(fd, b, sizeof(b), 0);
             if (k <= 0) break;
             buf.append(b, (size_t)k);
-            struct sockaddr_in da; memset(&da, 0, sizeof(da));
-            da.sin_family = AF_INET;
-            da.sin_addr.s_addr = s->client_addr4;
+            struct sockaddr_in6 da; memset(&da, 0, sizeof(da));
+            da.sin6_family = AF_INET6;
+            da.sin6_addr = s->client_addr6.sin6_addr;
             frames_from(buf, [&](int ch, const char *p, size_t n) {
-                da.sin_port = htons(ch == 0 ? (uint16_t)s->rtp_port : (uint16_t)s->rtcp_port);
+                da.sin6_port = htons(ch == 0 ? (uint16_t)s->rtp_port : (uint16_t)s->rtcp_port);
                 sendto(ch == 0 ? s->udp_rtp : s->udp_rtcp, p, (int)n, 0, (struct sockaddr *)&da, sizeof(da));
             });
         }
@@ -1420,15 +1427,14 @@ struct RtspProxy {
     }
 
     // ---------------- 单连接处理 ----------------
-    void handle(int cfd, uint32_t caddr) {
+    void handle(int cfd, const struct sockaddr_in6 &caddr) {
         SessPtr s = std::make_shared<RtspSess>();
         s->client = cfd;
-        s->client_addr4 = caddr;
+        s->client_addr6 = caddr;
         {
-            struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_addr.s_addr = caddr;
-            log_i("connect from %s", inet_ntoa(sa.sin_addr));
+            char buf[64] = {0};
+            inet_ntop(AF_INET6, &caddr.sin6_addr, buf, sizeof(buf));
+            log_i("connect from %s", buf);
         }
         try {
             while (g_run) {
@@ -1475,15 +1481,14 @@ struct RtspProxy {
                                 s->udp = true;
                                 s->rtp_port = atoi(pm[1].str().c_str());
                                 s->rtcp_port = pm[2].matched ? atoi(pm[2].str().c_str()) : s->rtp_port + 1;
-                                s->udp_rtp = socket(AF_INET, SOCK_DGRAM, 0);
-                                s->udp_rtcp = socket(AF_INET, SOCK_DGRAM, 0);
-                                struct sockaddr_in a; memset(&a, 0, sizeof(a));
-                                a.sin_family = AF_INET;
-                                // 绑定到客户端连入的本机地址,保证 RTP 源地址与 Transport
-                                // 里宣告的 source 一致(多接口/跨网段时客户端会按源过滤)
-                                a.sin_addr.s_addr = inet_addr(s->local_ip.c_str());
-                                if (a.sin_addr.s_addr == 0xFFFFFFFFu || a.sin_addr.s_addr == 0)
-                                    a.sin_addr.s_addr = 0; // 解析失败退回 0.0.0.0
+                                s->udp_rtp = socket(AF_INET6, SOCK_DGRAM, 0);
+                                s->udp_rtcp = socket(AF_INET6, SOCK_DGRAM, 0);
+                                int v6only = 0;
+                                setsockopt(s->udp_rtp, IPPROTO_IPV6, IPV6_V6ONLY, (SOCKOPT *)&v6only, sizeof(v6only));
+                                setsockopt(s->udp_rtcp, IPPROTO_IPV6, IPV6_V6ONLY, (SOCKOPT *)&v6only, sizeof(v6only));
+                                struct sockaddr_in6 a; memset(&a, 0, sizeof(a));
+                                a.sin6_family = AF_INET6;
+                                a.sin6_addr = in6addr_any; // 双栈:UDP 源地址由内核按路由选取
                                 bind(s->udp_rtp, (struct sockaddr *)&a, sizeof(a));
                                 bind(s->udp_rtcp, (struct sockaddr *)&a, sizeof(a));
                                 sock_set_timeout(s->udp_rtcp, 5); // 周期醒来检查 g_run
@@ -1543,13 +1548,11 @@ struct RtspProxy {
 
     void serve(int listen_fd) {
         while (g_run) {
-            struct sockaddr_in ca; memset(&ca, 0, sizeof(ca));
+            struct sockaddr_in6 ca; memset(&ca, 0, sizeof(ca));
             SOCKLEN cl = sizeof(ca);
             int cfd = accept(listen_fd, (struct sockaddr *)&ca, &cl);
             if (cfd < 0) continue;
-            // 保持网络字节序,sendto 直接使用
-            uint32_t addr = ca.sin_addr.s_addr;
-            std::thread(&RtspProxy::handle, this, cfd, addr).detach();
+            std::thread(&RtspProxy::handle, this, cfd, ca).detach();
         }
     }
 };
@@ -1559,11 +1562,13 @@ static void rtsp_proxy_main(const Config &cfg) {
     px.edge_host = cfg.get("edge_host");
     px.edge_port = cfg.geti("edge_port", 554);
     int port = cfg.geti("rtsp_port", 554);
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int lfd = socket(AF_INET6, SOCK_STREAM, 0);
     int one = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (SOCKOPT *)&one, sizeof(one));
-    struct sockaddr_in a; memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET; a.sin_addr.s_addr = 0; a.sin_port = htons((uint16_t)port);
+    int v6only = 0;
+    setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, (SOCKOPT *)&v6only, sizeof(v6only)); // 双栈:同时接受 v4/v6
+    struct sockaddr_in6 a; memset(&a, 0, sizeof(a));
+    a.sin6_family = AF_INET6; a.sin6_addr = in6addr_any; a.sin6_port = htons((uint16_t)port);
     if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(lfd, 16) != 0) {
         log_e("rtsp proxy bind :%d failed", port);
         return;
