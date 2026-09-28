@@ -5,8 +5,9 @@ IPTV 助手:EPG 鉴权抓取 → 生成 M3U/TXT/EPG 节目单 → RTSP 回看(pl
 **cron 或内置调度**;服务由 **procd** 托管;日志进 **syslog**。代码零硬编码,
 全部参数在 `/etc/config/iptv-helper`。
 
-> ✅ **已实测通过:河北电信 IPTV**(华为 HWServer/HMS_V1R2 平台,320 频道,
-> 7 天节目单抓取、直播、RTSP 回看全部验证可用)。
+> ✅ **已实测通过:河北电信 HWCTC**(华为 HMS 平台,320 频道)与
+> **联通 HWCU**(EDS 调度 + `getchannellistHWCU.jsp`),直播 / 7 天节目单 /
+> RTSP 回看全部验证可用。切换运营商只改一个配置项 `isp`。
 
 ## 参考 / 致谢
 
@@ -19,6 +20,22 @@ IPTV 助手:EPG 鉴权抓取 → 生成 M3U/TXT/EPG 节目单 → RTSP 回看(pl
   并列」的拼装规则由本项目自定义(见下文 catchup 一节),不依赖第三方约定
 - 华为边缘服务器 302 跳转媒体节点、仅对 `RTP/AVP/TCP;interleaved` 出流等行为,
   均为对河北电信现网实测得出
+
+## 支持的运营商
+
+两家华为边缘平台,差异只在两处:
+
+| 运营商 | EPG 平台 | 鉴权 / 列表 JSP | EPG 服务器地址 |
+|---|---|---|---|
+| 电信 `telecom`(默认) | HWServer HMS | `ValidAuthenticationHWCTC.jsp` / `getchannellistHWCTC.jsp` | 直填 `epg_host:epg_port` |
+| 联通 `unicom` | HWServer HMS | `ValidAuthenticationHWCU.jsp` / `getchannellistHWCU.jsp` | 由 EDS 调度 302 分配,填 `eds_url` 即可 |
+
+联通 EPG 服务器不是固定 IP,EDS(调度)每次返回的 302 都会指向不同的 EPG 节点,
+写死地址会在调度换节点后失效,因此本项目在 `isp=unicom` 时每次生成前先访问一次
+EDS 拿到当次的 EPG 地址再走后续抓取。鉴权表单字段两家同名,不用另配。
+
+`rtsp` 地址来源两家也不同:电信都在 `ChannelURL`,联通在 `TimeShiftURL`,
+解析器先取后者、取不到再回退到 `ChannelURL`,两个平台都能解析出回看 URL。
 
 ## 功能
 
@@ -118,6 +135,31 @@ opkg install iptv-helper_*.ipk luci-app-iptv-helper_*.ipk
 #   其余页: EPG 地址、鉴权表单(抓包)、边缘服务器、udpxy、定时
 #   「基本与生成」页点「立即生成」
 ```
+
+### 切换运营商
+
+只改一个字段,其余按默认即可:
+
+```sh
+# 电信(默认,填 EPG 服务器)
+uci set iptv-helper.isp='telecom'
+uci set iptv-helper.epg_host='<电信 EPG IP>'
+uci commit iptv-helper && /etc/init.d/iptv-helper restart
+
+# 联通(填 EDS 调度入口,EPG 由 302 分配,不用手填 epg_host)
+uci set iptv-helper.isp='unicom'
+uci set iptv-helper.eds_url='http://<eds-host>:8082'
+uci commit iptv-helper && /etc/init.d/iptv-helper restart
+```
+
+- `isp` 只在**留空或仍是电信默认路径**时决定 `auth_path` / `channellist_path`;
+  你手工改过的值一律尊重配置,不会被切换运营商冲掉(升级兼容)。
+- 鉴权表单字段(`UserID` / `Lang` / `SupportHD` / `NetUserID` / `Authenticator` /
+  `STBType` / `AuthType` / `MAC` / `DeviceID`)两家同名,从 LuCI「鉴权」页填,
+  一般从抓包或 IPTV 客户端本地缓存里抠。
+- `isp=unicom` 时,每次生成前会先访问 EDS 拿当次 EPG 地址,`logread | grep iptv-helper`
+  能看到 `EDS resolved EPG <host>:<port>` 一行;若这一步失败,后面抓取不会开始,
+  先看 EDS 是否可达。
 
 生成物下载地址(uhttpd):
 - `http://<路由器>/iptv/LanLive.m3u`、`LanReplay.m3u`

@@ -363,7 +363,7 @@ static std::string detect_lan_ip(const Config &cfg) {
 }
 
 // ---------------------------------------------------------------- HTTP 客户端(带 cookie)
-struct HttpResp { int status = 0; std::string body; };
+struct HttpResp { int status = 0; std::string body, location; };
 
 // 解析 http://host[:port]/path(台标 URL)
 // 解析 URL 里的 "host[:port]" 段。host 支持方括号 IPv6 字面量([::1]:8080);
@@ -462,6 +462,12 @@ private:
             if (eq != std::string::npos) cookies[trim(kvpair.substr(0, eq))] = trim(kvpair.substr(eq + 1));
             p = nl;
         }
+        // 302 跳转目标:联通的 EDS 调度靠它给出本次的 EPG 地址
+        size_t lp = lhead.find("location:");
+        if (lp != std::string::npos) {
+            size_t ln = head.find('\n', lp);
+            r.location = trim(head.substr(lp + 9, (ln == std::string::npos ? head.size() : ln) - lp - 9));
+        }
         bool chunked = lhead.find("transfer-encoding: chunked") != std::string::npos;
         size_t clp = lhead.find("content-length:");
         if (chunked) {
@@ -527,6 +533,44 @@ static bool is_auth_empty_field(const char *f) {
     return false;
 }
 
+// ---------------------------------------------------------------- 运营商(电信 / 联通)
+// 两个平台只差两件事:EPG 路径后缀(HWCTC / HWCU)、EPG 取址方式(写死 / EDS 调度)。
+// 鉴权字段两边同名,仍旧从配置读,不另开一套。
+static bool is_unicom(const Config &cfg) { return cfg.get("isp") == "unicom"; }
+
+static const char *kAuthCTC = "/EPG/jsp/ValidAuthenticationHWCTC.jsp";
+static const char *kAuthCU  = "/EPG/jsp/ValidAuthenticationHWCU.jsp";
+static const char *kListCTC = "/EPG/jsp/getchannellistHWCTC.jsp";
+static const char *kListCU  = "/EPG/jsp/getchannellistHWCU.jsp";
+
+// 配置里留空、或仍是电信默认路径(即没人改过)时按运营商自动切换;
+// 用户手改过的一律尊重配置,避免升级把自定义值冲掉。
+static std::string isp_path(const Config &cfg, const char *key, const char *ctc, const char *cu) {
+    std::string v = cfg.get(key);
+    if (v.empty() || v == ctc) return is_unicom(cfg) ? cu : ctc;
+    return v;
+}
+
+// 联通:EPG 由 EDS 每次 302 分配(调度节点会轮换),
+// 写死会在调度换节点后失效,故每次生成前先问一次 EDS。
+static bool eds_resolve(HttpClient &hc, const Config &cfg, std::string &host, int &port) {
+    std::string eds = cfg.get("eds_url");
+    if (eds.empty()) { log_e("isp=unicom requires eds_url (e.g. http://<eds-host>:8082)"); return false; }
+    std::string eh, ep; int eport = 80;
+    if (!parse_http_url(eds, eh, eport, ep)) { log_e("bad eds_url: %s", eds.c_str()); return false; }
+    std::string q = ep + (ep.find('?') == std::string::npos ? "?" : "&")
+                  + "UserID=" + url_encode(cfg.get("UserID")) + "&Action=Login";
+    HttpResp r = hc.get(eh, eport, q, 15);
+    std::string lh, lp; int lport = 80;
+    if (r.status != 302 || r.location.empty() || !parse_http_url(r.location, lh, lport, lp)) {
+        log_e("EDS %s -> status=%d location='%s'", q.c_str(), r.status, r.location.c_str());
+        return false;
+    }
+    host = lh; port = lport;
+    log_i("EDS resolved EPG %s:%d", host.c_str(), port);
+    return true;
+}
+
 static std::string auth_body(const Config &cfg) {
     // 表单字段与值全部来自配置文件(固定空值字段除外)
     const char *fields[] = {"UserID","Lang","SupportHD","NetUserID","Authenticator","STBType",
@@ -545,24 +589,37 @@ static std::string auth_body(const Config &cfg) {
 
 static void do_auth(HttpClient &hc, const Config &cfg) {
     auto r = hc.post(cfg.get("epg_host"), cfg.geti("epg_port", 80),
-                     cfg.get("auth_path", "/EPG/jsp/ValidAuthenticationHWCTC.jsp"),
+                     isp_path(cfg, "auth_path", kAuthCTC, kAuthCU),
                      auth_body(cfg), "application/x-www-form-urlencoded");
     log_i("auth status=%d", r.status);
 }
 
 static std::vector<Channel> parse_channels(const std::string &t) {
     std::vector<Channel> out;
+    // UserChannelID=" 里含 ChannelID=" 子串(联通数据每条都有),
+    // 直接 find 会把一条频道切成两条(实测 195 台被数成 390),故跳过前面紧跟字母的匹配。
+    auto find_rec = [&](size_t from) -> size_t {
+        size_t k = t.find("ChannelID=\"", from);
+        while (k != std::string::npos && k > 0 && isalpha((unsigned char)t[k - 1]))
+            k = t.find("ChannelID=\"", k + 1);
+        return k;
+    };
     size_t pos = 0;
     while (true) {
-        size_t cs = t.find("ChannelID=\"", pos);
+        size_t cs = find_rec(pos);
         if (cs == std::string::npos) break;
         size_t ce = t.find('"', cs + 11);
         if (ce == std::string::npos) break;
         Channel ch;
         ch.id = t.substr(cs + 11, ce - cs - 11);
+        // 本条记录的搜索上界:下一条 ChannelID 之前。
+        // 没有它,某条记录缺字段(如电信形态没有 TimeShiftURL)时会一路搜到下一条记录里,
+        // 把下一条的字段当成自己的,还会让 pos 跳过去、整条记录丢失。
+        size_t next = find_rec(ce);
+        size_t limit = (next == std::string::npos) ? t.size() : next;
         auto grab = [&](const std::string &key, size_t from, std::string &dst) -> size_t {
             size_t k = t.find(key + "=\"", from);
-            if (k == std::string::npos) return std::string::npos;
+            if (k == std::string::npos || k >= limit) return std::string::npos;
             k += key.size() + 2;
             size_t e = t.find('"', k);
             if (e == std::string::npos) return std::string::npos;
@@ -581,16 +638,28 @@ static std::vector<Channel> parse_channels(const std::string &t) {
             size_t e = url.find_first_of(" \t|", gi);
             ch.igmp = url.substr(gi + 7, (e == std::string::npos ? url.size() : e) - gi - 7);
         }
-        size_t ri = url.find("rtsp://");
-        if (ri != std::string::npos) {
-            size_t e = url.find("smil", ri);
-            if (e != std::string::npos) ch.rtsp = url.substr(ri, e + 4 - ri);
+        // 时移/回看地址放哪,两个平台不一样:
+        //   电信 HWCTC:igmp 与 rtsp 都在 ChannelURL 字段里;
+        //   联通 HWCU:ChannelURL 只有 igmp,rtsp 单独在 TimeShiftURL 字段。
+        // 所以先按 TimeShiftURL 取,取不到再回退 ChannelURL,两边都能解析。
+        std::string ts;
+        size_t p6 = grab("TimeShiftURL", p5, ts);
+        // 谁先解析出 "...smil" 就用谁:TimeShiftURL 优先(联通 HWCU),
+        // 解析不到再回退 ChannelURL(电信 HWCTC 两个地址都在 ChannelURL 里),
+        // 避免某平台 TimeShiftURL 存在但格式不同导致整台被丢。
+        const std::string *srcs[2] = {&ts, &url};
+        for (int k = 0; k < 2 && ch.rtsp.empty(); ++k) {
+            if (srcs[k]->empty()) continue;
+            size_t ri = srcs[k]->find("rtsp://");
+            if (ri == std::string::npos) continue;
+            size_t e = srcs[k]->find("smil", ri);
+            if (e != std::string::npos) ch.rtsp = srcs[k]->substr(ri, e + 4 - ri);
         }
         if (!ch.rtsp.empty() && !ch.igmp.empty()) {
             ch.group = group_of(ch.ucid);
             out.push_back(ch);
         }
-        pos = p5;
+        pos = (p6 == std::string::npos) ? p5 : p6;
     }
     return out;
 }
@@ -956,7 +1025,15 @@ static std::string gzip_store(const std::string &in) {
 }
 
 // ---------------------------------------------------------------- 抓取+生成 主流程
-static bool run_generate(const Config &cfg) {
+static bool run_generate(const Config &cfg_in) {
+    Config cfg = cfg_in; // 联通:EDS 解析出的 EPG 地址写回这个副本,下面取址逻辑不用改
+    HttpClient hc;
+    if (is_unicom(cfg)) {
+        std::string h; int p = 80;
+        if (!eds_resolve(hc, cfg, h, p)) return false;
+        cfg.kv["epg_host"] = h;
+        cfg.kv["epg_port"] = std::to_string(p);
+    }
     std::string epg_host = cfg.get("epg_host");
     int epg_port = cfg.geti("epg_port", 80);
     if (epg_host.empty()) { log_e("epg_host not configured"); return false; }
@@ -976,10 +1053,9 @@ static bool run_generate(const Config &cfg) {
     std::string web_base = web_base_of(cfg, lan_ip);
     log_i("out_dir=%s web_base=%s", dir.c_str(), web_base.c_str());
 
-    HttpClient hc;
     do_auth(hc, cfg);
     auto list_resp = hc.post(epg_host, epg_port,
-                             cfg.get("channellist_path", "/EPG/jsp/getchannellistHWCTC.jsp"), "",
+                             isp_path(cfg, "channellist_path", kListCTC, kListCU), "",
                              "application/x-www-form-urlencoded");
     if (list_resp.status != 200 || list_resp.body.size() < 1000) {
         log_e("channellist failed, status=%d size=%d", list_resp.status, (int)list_resp.body.size());

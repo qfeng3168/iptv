@@ -119,9 +119,20 @@ for _, kv in ipairs(auth_keys) do
 end
 
 -- ============ 服务器与发布地址 ============
-o = s:taboption("net", Value, "epg_host", translate("EPG 服务器地址"))
+o = s:taboption("net", ListValue, "isp", translate("运营商"))
+o:value("telecom", translate("电信(HWCTC)"))
+o:value("unicom", translate("联通(HWCU)"))
+o.default = "telecom"
+
+-- 联通:EPG 地址由 EDS 每次 302 分配,不手填;电信:直接填 EPG 服务器
+o = s:taboption("net", Value, "eds_url", translate("EDS 调度入口(联通)"))
+o.placeholder = "http://<eds-host>:8082"
+o:depends("isp", "unicom")
+
+o = s:taboption("net", Value, "epg_host", translate("EPG 服务器地址(电信)"))
 o.datatype = "host"
 o.rmempty = false
+o:depends("isp", "telecom")
 
 o = s:taboption("net", Value, "epg_port", translate("EPG 服务器端口"))
 o.datatype = "port"
