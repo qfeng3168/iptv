@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=iptv-helper
 PKG_VERSION:=1.1.0
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 PKG_MAINTAINER:=qfeng3168
 PKG_LICENSE:=MIT
 
